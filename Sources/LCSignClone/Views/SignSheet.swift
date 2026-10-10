@@ -64,7 +64,9 @@ struct SignSheet: View {
                 // ---- 可选改写 ----
                 Section {
                     TextField("留空则保持原值", text: $bundleID)
-                        .autocorrectionDisabled()
+                        // 用 disableAutocorrection 而不是 autocorrectionDisabled()：
+                        // 后者是 iOS 16 才有的 API，而本项目 deployment target 是 15.0。
+                        .disableAutocorrection(true)
                         .textInputAutocapitalization(.never)
                 } header: {
                     Text("Bundle ID")

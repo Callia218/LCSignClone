@@ -103,7 +103,7 @@ final class AppModel: ObservableObject {
                       bundleID: String?,
                       displayName: String?) async {
 
-        var task = SigningTask(name: input.deletingPathExtension().lastPathComponent)
+        let task = SigningTask(name: input.deletingPathExtension().lastPathComponent)
         tasks.insert(task, at: 0)
         let taskID = task.id
 

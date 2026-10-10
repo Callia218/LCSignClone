@@ -65,20 +65,43 @@ else
   mkdir -p "$BUILD/zsign-bin"
   SRC="$BUILD/zsign-src"
   if [[ ! -d "$SRC/.git" ]]; then
-    git clone --depth 1 https://github.com/zhlynn/zsign.git "$SRC"
+    git clone --depth 1 https://github.com/zhlynn/zsign.git "$SRC" \
+      || die "clone zsign 失败，检查网络"
   fi
 
-  OPENSSL_PREFIX="$(brew --prefix openssl@3 2>/dev/null || echo /usr/local/opt/openssl@3)"
-  [[ -d "$OPENSSL_PREFIX" ]] || die "未找到 OpenSSL，执行：brew install openssl@3"
+  # zsign 的 Makefile 在 build/<平台>/ 下，**不在仓库根目录**。
+  # 在根目录直接 make 只会得到 "No targets specified and no makefile found"。
+  MAKE_DIR="$SRC/build/macos"
+  [[ -f "$MAKE_DIR/Makefile" ]] \
+    || die "找不到 $MAKE_DIR/Makefile，zsign 仓库结构可能变了"
 
-  ( cd "$SRC" && make clean >/dev/null 2>&1 || true
-    make \
-      CFLAGS="-I$OPENSSL_PREFIX/include -O2 -std=c++17" \
-      LDFLAGS="-L$OPENSSL_PREFIX/lib -lcrypto -lssl -lz -lbz2 -lc++" ) \
-    || die "zsign 编译失败"
+  command -v pkg-config >/dev/null 2>&1 \
+    || die "未找到 pkg-config，执行：brew install pkg-config"
 
-  bin="$(find "$SRC" -maxdepth 2 -type f -name zsign -perm -u+x | head -1)"
-  [[ -n "$bin" ]] || die "编译完成但找不到 zsign 可执行文件"
+  # Makefile 靠 pkg-config 定位 OpenSSL（OPENSSL_INCLUDE / OPENSSL_LIB）。
+  # openssl@3 是 keg-only，不把它的 pkgconfig 目录塞进 PKG_CONFIG_PATH，
+  # pkg-config --cflags openssl 会直接失败，编译出来的命令里没有任何 OpenSSL 参数。
+  OPENSSL_PREFIX="$(brew --prefix openssl@3 2>/dev/null || true)"
+  [[ -n "$OPENSSL_PREFIX" && -d "$OPENSSL_PREFIX" ]] \
+    || die "未找到 openssl@3，执行：brew install openssl@3"
+
+  export PKG_CONFIG_PATH="$OPENSSL_PREFIX/lib/pkgconfig:${PKG_CONFIG_PATH:-}"
+  pkg-config --exists openssl \
+    || die "pkg-config 找不到 openssl，检查 PKG_CONFIG_PATH=$PKG_CONFIG_PATH"
+  ok "OpenSSL: $(pkg-config --modversion openssl)"
+
+  (
+    cd "$MAKE_DIR"
+    make clean >/dev/null 2>&1 || true
+    make
+  ) || die "zsign 编译失败"
+
+  # Makefile 里 BINDIR = ../../bin，即 <SRC>/bin/zsign
+  bin="$SRC/bin/zsign"
+  if [[ ! -x "$bin" ]]; then
+    bin="$(find "$SRC" -maxdepth 3 -type f -name zsign -perm -u+x | head -1)"
+  fi
+  [[ -n "$bin" && -x "$bin" ]] || die "编译完成但找不到 zsign 可执行文件"
   cp "$bin" "$ZSIGN_BIN"
   ok "编译完成"
 fi
@@ -87,9 +110,17 @@ fi
 # 2. 预检：p12 与描述文件的 Team ID 必须一致
 # ---------------------------------------------------------------------------
 step "校验证书与描述文件配对"
-p12_team="$(openssl pkcs12 -in "$P12" -nokeys -clcerts -passin "pass:$PASS" 2>/dev/null \
-  | openssl x509 -noout -subject 2>/dev/null \
-  | grep -o 'OU *= *[A-Za-z0-9]*' | head -1 | sed 's/.*= *//' || true)"
+
+# macOS 钥匙串导出的 p12 常带 3DES/RC2 这类 legacy 加密，OpenSSL 3 默认不认，
+# 得加 -legacy。所以先按默认试一次，不行再退回 legacy。
+p12_team=""
+for extra in "" "-legacy"; do
+  p12_team="$(openssl pkcs12 -in "$P12" -nokeys -clcerts -passin "pass:$PASS" $extra 2>/dev/null \
+    | openssl x509 -noout -subject 2>/dev/null \
+    | grep -o 'OU *= *[A-Za-z0-9]*' | head -1 | sed 's/.*= *//' || true)"
+  if [[ -n "$p12_team" ]]; then break; fi
+done
+
 prov_team="$(security cms -D -i "$PROV" 2>/dev/null \
   | plutil -extract TeamIdentifier.0 raw - 2>/dev/null || true)"
 app_id="$(security cms -D -i "$PROV" 2>/dev/null \
@@ -120,15 +151,23 @@ ok "配对校验通过"
 step "执行签名"
 mkdir -p "$(dirname "$OUT")"
 
-args=(-k "$P12" -m "$PROV" -o "$OUT" -z)
-[[ -n "$PASS" ]] && args+=(-p "$PASS")
-[[ -n "$ENT" ]] && args+=(-e "$ENT")
-[[ -n "$BUNDLE_ID" ]] && args+=(-b "$BUNDLE_ID")
-[[ -n "$NAME" ]] && args+=(-n "$NAME")
-for d in "${DYLIB[@]:-}"; do [[ -n "$d" ]] && args+=(-l "$d"); done
+# -z 是 --zip_level，**必须带值（0-9）**。
+# 写成裸的 -z 会把后面的输入 IPA 路径当成压缩级别吃掉，命令里就没有输入文件了。
+args=(-k "$P12" -m "$PROV" -o "$OUT" -z 6)
+if [[ -n "$PASS" ]]; then args+=(-p "$PASS"); fi
+if [[ -n "$ENT"  ]]; then args+=(-e "$ENT");  fi
+if [[ -n "$BUNDLE_ID" ]]; then args+=(-b "$BUNDLE_ID"); fi
+if [[ -n "$NAME" ]]; then args+=(-n "$NAME"); fi
+for d in ${DYLIB[@]+"${DYLIB[@]}"}; do
+  if [[ -n "$d" ]]; then args+=(-l "$d"); fi
+done
 args+=("$IPA")
 
-echo "  zsign ${args[*]//$PASS/******}"
+# 回显时把密码遮掉。注意别用 ${args[*]//$PASS/...} —— PASS 为空时
+# 空模式串会让 bash 到处插替换内容。
+display="${args[*]}"
+if [[ -n "$PASS" ]]; then display="${display//$PASS/******}"; fi
+echo "  zsign $display"
 echo
 
 if "$ZSIGN_BIN" "${args[@]}"; then

@@ -34,7 +34,10 @@ jobs:
 
       - name: 安装构建工具
         run: |
-          brew install xcodegen openssl@3
+          # pkg-config 是必需的：zsign 的 macOS Makefile 靠它定位 OpenSSL
+          brew install xcodegen openssl@3 pkg-config
+          # openssl@3 是 keg-only，pkg-config 默认看不到，得手动指路
+          echo "PKG_CONFIG_PATH=$(brew --prefix openssl@3)/lib/pkgconfig" >> "$GITHUB_ENV"
 
       - name: 编译 zsign 静态库
         run: bash Scripts/10_build_zsign.sh

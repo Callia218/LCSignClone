@@ -218,17 +218,21 @@ public actor CertificateStore {
     }
 
     private static func loadIdentity(from url: URL, password: String) throws -> IdentityInfo {
-        let info: ZSignP12Info
+        // 显式标注成可选类型：Clang 导入器对「可空返回值 + NSError**」的推断
+        // 在不同 SDK 上并不一致（有时给 T?，有时直接给 T 靠 throws 报错）。
+        // 写成 T? 两种情况下都能编译，也不依赖具体是哪种推断。
+        let inspected: ZSignP12Info?
         do {
-            guard let parsed = try ZSignBridge.inspectP12(path: url.path, password: password) else {
-                throw SigningError.p12Unreadable("文件里没有任何签名身份。")
-            }
-            info = parsed
+            inspected = try ZSignBridge.inspectP12(path: url.path, password: password)
         } catch let error as SigningError {
             throw error
         } catch {
             // ZSignBridge 抛的是 NSError，把它的描述原样带出去
             throw SigningError.p12Unreadable((error as NSError).localizedDescription)
+        }
+
+        guard let info = inspected else {
+            throw SigningError.p12Unreadable("文件里没有任何签名身份。")
         }
 
         return IdentityInfo(

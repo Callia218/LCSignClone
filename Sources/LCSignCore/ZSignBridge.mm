@@ -128,9 +128,9 @@ static NSError *MakeError(ZSignErrorCode code, NSString *message, NSString *sugg
     return YES;
 }
 
-+ (ZSignP12Info *)inspectP12AtPath:(NSString *)p12Path
-                          password:(NSString *)password
-                             error:(NSError **)error
++ (nullable ZSignP12Info *)inspectP12AtPath:(NSString *)p12Path
+                                   password:(NSString *)password
+                                      error:(NSError **)error
 {
     NSFileManager *fm = NSFileManager.defaultManager;
 
