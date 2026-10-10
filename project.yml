@@ -52,6 +52,11 @@ targets:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.example.lcsigncore
         PRODUCT_NAME: LCSignCore
+        # 让 Xcode 自动合成 Info.plist。
+        # 不设这个的话 framework 里**不会有 Info.plist**，是个畸形 bundle：
+        # 重签名时 zsign 要从里面读 CFBundleIdentifier 来给嵌套框架生成
+        # 签名标识，读不到就只能签出一个 iOS 拒绝加载的框架。
+        GENERATE_INFOPLIST_FILE: YES
         # 混合语言 framework 的关键开关：置 Yes 后 Xcode 会为 framework 生成
         # 模块映射，并把 include/LCSignCore.h 当作伞形头文件 —— Swift 侧因此
         # 能直接看到 ZSignBridge，而不需要（framework 也不支持）桥接头。
