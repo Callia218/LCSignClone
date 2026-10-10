@@ -51,14 +51,17 @@ targets:
         PRODUCT_NAME: LCSignCore
         DEFINES_MODULE: YES
         SKIP_INSTALL: NO
-        # 由 10_build_zsign.sh 生成的产物
+        # 由 10_build_zsign.sh 生成的产物。
+        # 桥接层只 include zsign_shim.h（纯 C），zsign 的 C++ 头文件依赖
+        # （bundle.h / openssl.h / json.h）被封在静态库内部，不会漏进来。
         HEADER_SEARCH_PATHS:
           - "$(SRCROOT)/Vendor/zsign/include"
         LIBRARY_SEARCH_PATHS:
           - "$(SRCROOT)/Vendor/zsign/lib"
-        # OpenSSL 由 SwiftPM 提供，这里只链接 zsign 与系统库
+        # OpenSSL 由 SwiftPM 提供；这里链接 zsign 静态库、C++ 运行时与压缩库
         OTHER_LDFLAGS:
           - "-lzsign"
+          - "-lc++"
           - "-lz"
           - "-lbz2"
         CLANG_ENABLE_OBJC_ARC: YES
