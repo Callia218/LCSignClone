@@ -111,11 +111,12 @@ done < <(
     ! -path '*/.git/*' \
     ! -path '*/build/*' \
     ! -name 'zsign.cpp' \
+    ! -name 'iowin32.c' \
     | sort
 )
 
 [[ ${#SOURCES[@]} -gt 0 ]] || die "zsign 源码里找不到任何源文件，仓库结构可能变了"
-info "zsign 源文件 ${#SOURCES[@]} 个（已排除含 main() 的 zsign.cpp）"
+info "zsign 源文件 ${#SOURCES[@]} 个（已排除 zsign.cpp 与 Windows 专用的 iowin32.c）"
 
 SHIM_SOURCES=("${SHIM_DIR}/zsign_shim.cpp")
 [[ -f "${SHIM_SOURCES[0]}" ]] || die "找不到 ${SHIM_SOURCES[0]}"
@@ -133,12 +134,24 @@ compile_one() {
   local tag="$2"
   local obj="${OBJ_DIR}/${tag}.o"
 
-  xcrun --sdk iphoneos clang++ -c "${src}" \
+  # .c 用 clang，.cpp/.cc 用 clang++。
+  # 用 clang++ 编 .c 会让 clang 把 C 当 C++ 处理，是 deprecated 行为，
+  # 遇到 C 里合法的构造（如隐式 void* 转换）会直接报错。
+  local compiler="clang++"
+  local std_flags=(-std=c++17 -fexceptions -frtti)
+  case "${src}" in
+    *.c)
+      compiler="clang"
+      std_flags=(-std=gnu11)
+      ;;
+  esac
+
+  xcrun --sdk iphoneos "${compiler}" -c "${src}" \
     -arch "${ARCHS}" \
     -isysroot "${SDK_PATH}" \
     -miphoneos-version-min="${IOS_MIN}" \
-    -std=c++17 -O2 -fPIC \
-    -fexceptions -frtti -DNDEBUG \
+    -O2 -fPIC -DNDEBUG \
+    "${std_flags[@]}" \
     "${INCLUDES[@]}" \
     -o "${obj}" || die "编译失败 ${src}"
 }
