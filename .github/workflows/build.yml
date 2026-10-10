@@ -89,15 +89,38 @@ jobs:
           P12_BASE64: ${{ secrets.P12_BASE64 }}
           PROVISION_BASE64: ${{ secrets.PROVISION_BASE64 }}
           P12_PASSWORD: ${{ secrets.P12_PASSWORD }}
+          # 可选。描述文件的 App ID 覆盖不了 com.example.lcsignclone 时，
+          # 在 Settings → Secrets and variables → Actions → Variables 里
+          # 加一个 BUNDLE_ID 变量，指定一个被描述文件覆盖的 Bundle ID。
+          BUNDLE_ID: ${{ vars.BUNDLE_ID }}
         run: |
-          printf '%s' "$P12_BASE64" | base64 -d > cert.p12
-          printf '%s' "$PROVISION_BASE64" | base64 -d > profile.mobileprovision
+          # 兼容不同平台的 base64：macOS 老版本用 -D，GNU 用 -d
+          b64decode() {
+            base64 -d > "$1" 2>/dev/null || base64 -D > "$1" 2>/dev/null || base64 --decode > "$1"
+          }
+
+          printf '%s' "$P12_BASE64" | b64decode cert.p12
+          printf '%s' "$PROVISION_BASE64" | b64decode profile.mobileprovision
+
+          if [ ! -s cert.p12 ]; then
+            echo "::error::P12_BASE64 解码后为空，检查 Secret 是否填对"
+            exit 1
+          fi
+          if [ ! -s profile.mobileprovision ]; then
+            echo "::error::PROVISION_BASE64 解码后为空，检查 Secret 是否填对"
+            exit 1
+          fi
+          ls -l cert.p12 profile.mobileprovision
+
+          extra=()
+          if [ -n "$BUNDLE_ID" ]; then extra+=(--bundle-id "$BUNDLE_ID"); fi
 
           bash Scripts/20_resign_cli.sh \
             --ipa  LCSignClone-unsigned.ipa \
             --p12  cert.p12 \
             --pass "$P12_PASSWORD" \
             --prov profile.mobileprovision \
+            "${extra[@]}" \
             --out  LCSignClone-signed.ipa
 
           rm -f cert.p12 profile.mobileprovision

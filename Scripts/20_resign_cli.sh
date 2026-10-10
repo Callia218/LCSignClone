@@ -191,6 +191,55 @@ fi
 ok "配对校验通过"
 
 # ---------------------------------------------------------------------------
+# 2b. 预检：描述文件的 App ID 必须能覆盖目标 Bundle ID
+#
+# 这是重签名失败里最常见、也最难自查的一类 —— Team 对得上、密码也对，
+# 但描述文件是 com.yourteam.myapp 而目标 App 是 com.example.whatever，
+# zsign 跑到一半才失败，报错还相当含糊。
+# ---------------------------------------------------------------------------
+step "校验 App ID 覆盖范围"
+
+# 目标 Bundle ID：--bundle-id 指定了就按它算，否则从 IPA 的 Info.plist 里读
+target_bid="$BUNDLE_ID"
+if [[ -z "$target_bid" ]]; then
+  # 先落盘再读 —— plutil 从 stdin 读二进制 plist 的行为各版本不一致
+  tmp_plist="$(mktemp)"
+  if unzip -p "$IPA" 'Payload/*/Info.plist' > "$tmp_plist" 2>/dev/null \
+     && [[ -s "$tmp_plist" ]]; then
+    target_bid="$(plutil -extract CFBundleIdentifier raw "$tmp_plist" 2>/dev/null || true)"
+  fi
+  rm -f "$tmp_plist"
+fi
+
+if [[ -z "$app_id" ]]; then
+  bad "描述文件里读不到 application-identifier，跳过覆盖性检查"
+elif [[ -z "$target_bid" ]]; then
+  bad "读不到目标 App 的 Bundle ID，跳过覆盖性检查"
+else
+  # application-identifier 形如 TEAMID.* 或 TEAMID.com.example.app，去掉 Team 前缀
+  pattern="${app_id#*.}"
+  covered="no"
+
+  if [[ "$pattern" == "*" ]]; then
+    covered="yes"
+  elif [[ "$pattern" == *".*" ]]; then
+    prefix="${pattern%.\*}"
+    if [[ "$target_bid" == "$prefix" || "$target_bid" == "$prefix".* ]]; then
+      covered="yes"
+    fi
+  elif [[ "$target_bid" == "$pattern" ]]; then
+    covered="yes"
+  fi
+
+  if [[ "$covered" == "yes" ]]; then
+    ok "App ID（$app_id）覆盖目标 Bundle ID（$target_bid）"
+  else
+    bad "描述文件 App ID（$app_id）覆盖不了目标 Bundle ID（$target_bid）"
+    die "两个办法：加 --bundle-id 指定一个被覆盖的 ID；或在开发者后台为这个 Bundle ID 新建描述文件"
+  fi
+fi
+
+# ---------------------------------------------------------------------------
 # 3. 执行签名
 # ---------------------------------------------------------------------------
 step "执行签名"
