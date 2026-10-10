@@ -59,18 +59,17 @@ done
 # 1. 准备 zsign 可执行文件（macOS 版）
 # ---------------------------------------------------------------------------
 step "准备 zsign"
-if [[ -x "$ZSIGN_BIN" ]]; then
-  ok "已存在 $ZSIGN_BIN"
-else
-  mkdir -p "$BUILD/zsign-bin"
+
+# 兜底路径：从源码编译。
+# zsign 的 Makefile 在 build/<平台>/ 下，**不在仓库根目录** ——
+# 在根目录直接 make 只会得到 "No targets specified and no makefile found"。
+build_zsign_from_source() {
   SRC="$BUILD/zsign-src"
   if [[ ! -d "$SRC/.git" ]]; then
     git clone --depth 1 https://github.com/zhlynn/zsign.git "$SRC" \
       || die "clone zsign 失败，检查网络"
   fi
 
-  # zsign 的 Makefile 在 build/<平台>/ 下，**不在仓库根目录**。
-  # 在根目录直接 make 只会得到 "No targets specified and no makefile found"。
   MAKE_DIR="$SRC/build/macos"
   [[ -f "$MAKE_DIR/Makefile" ]] \
     || die "找不到 $MAKE_DIR/Makefile，zsign 仓库结构可能变了"
@@ -80,7 +79,7 @@ else
 
   # Makefile 靠 pkg-config 定位 OpenSSL（OPENSSL_INCLUDE / OPENSSL_LIB）。
   # openssl@3 是 keg-only，不把它的 pkgconfig 目录塞进 PKG_CONFIG_PATH，
-  # pkg-config --cflags openssl 会直接失败，编译出来的命令里没有任何 OpenSSL 参数。
+  # pkg-config --cflags openssl 会直接失败，编译命令里就一条 OpenSSL 参数都没有。
   OPENSSL_PREFIX="$(brew --prefix openssl@3 2>/dev/null || true)"
   [[ -n "$OPENSSL_PREFIX" && -d "$OPENSSL_PREFIX" ]] \
     || die "未找到 openssl@3，执行：brew install openssl@3"
@@ -103,7 +102,53 @@ else
   fi
   [[ -n "$bin" && -x "$bin" ]] || die "编译完成但找不到 zsign 可执行文件"
   cp "$bin" "$ZSIGN_BIN"
-  ok "编译完成"
+}
+
+# 首选路径：官方 release 的预编译二进制。
+# 好处是版本固定、带 SHA256 校验、不用在本机装 pkg-config / openssl@3，
+# CI 上也能省掉一次完整编译。
+# 注意：官方只发布了 macOS **arm64** 版本，Intel 机器没有对应资产。
+ZSIGN_VERSION="${ZSIGN_VERSION:-v1.1.2}"
+
+download_zsign_release() {
+  local host_arch asset base dir expected actual
+  host_arch="$(uname -m)"
+  case "$host_arch" in
+    arm64|aarch64) asset="zsign-macos-arm64.tar.gz" ;;
+    *) return 1 ;;
+  esac
+
+  base="https://github.com/zhlynn/zsign/releases/download/${ZSIGN_VERSION}"
+  dir="$BUILD/zsign-bin"
+
+  curl -fsSL -o "$dir/$asset" "$base/$asset" || return 1
+  curl -fsSL -o "$dir/SHA256SUMS.txt" "$base/SHA256SUMS.txt" || return 1
+
+  expected="$(awk -v n="$asset" '$2 == n { print $1 }' "$dir/SHA256SUMS.txt" | head -1)"
+  actual="$(shasum -a 256 "$dir/$asset" | awk '{print $1}')"
+
+  if [[ -z "$expected" || "$expected" != "$actual" ]]; then
+    bad "SHA256 校验不通过（期望 ${expected:-空}，实际 $actual）"
+    return 1
+  fi
+
+  # 归档里就是单个 zsign 可执行文件
+  tar -xzf "$dir/$asset" -C "$dir" zsign || return 1
+  chmod +x "$dir/zsign" || return 1
+  ok "已使用官方预编译版本 ${ZSIGN_VERSION}（SHA256 校验通过）"
+  return 0
+}
+
+if [[ -x "$ZSIGN_BIN" ]]; then
+  ok "已存在 $ZSIGN_BIN"
+else
+  mkdir -p "$BUILD/zsign-bin"
+  if download_zsign_release; then
+    :
+  else
+    bad "预编译版本不可用，回退到源码编译"
+    build_zsign_from_source
+  fi
 fi
 
 # ---------------------------------------------------------------------------
