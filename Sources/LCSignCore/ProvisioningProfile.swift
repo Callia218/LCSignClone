@@ -5,7 +5,11 @@ import Foundation
 /// mobileprovision 本质是 CMS/PKCS#7 签名包裹的一段 XML plist。
 /// 我们只需要读内容、不需要验证签名，所以直接截取 plist 段落解析即可 ——
 /// 比走 Security.framework 的 CMSDecoder 更快，也少踩平台差异的坑。
-public struct ProvisioningProfile: Sendable {
+///
+/// `@unchecked Sendable`：所有字段都是 `let`，结构不可变，跨隔离域传递是安全的。
+/// 但 `entitlements` 是 `[String: Any]`，编译器无法自动证明其 Sendable，
+/// 只能手工担保（否则在 Swift 6 语言模式下会直接报错）。
+public struct ProvisioningProfile: @unchecked Sendable {
 
     public let name: String
     public let uuid: String

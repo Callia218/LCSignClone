@@ -218,111 +218,24 @@ public actor CertificateStore {
     }
 
     private static func loadIdentity(from url: URL, password: String) throws -> IdentityInfo {
-        let data: Data
+        let info: ZSignP12Info
         do {
-            data = try Data(contentsOf: url)
+            guard let parsed = try ZSignBridge.inspectP12(path: url.path, password: password) else {
+                throw SigningError.p12Unreadable("文件里没有任何签名身份。")
+            }
+            info = parsed
+        } catch let error as SigningError {
+            throw error
         } catch {
-            throw SigningError.p12Unreadable("无法读取文件：\(error.localizedDescription)")
+            // ZSignBridge 抛的是 NSError，把它的描述原样带出去
+            throw SigningError.p12Unreadable((error as NSError).localizedDescription)
         }
-
-        let options = [kSecImportExportPassphrase as String: password] as CFDictionary
-        var rawItems: CFArray?
-        let status = SecPKCS12Import(data as CFData, options, &rawItems)
-
-        switch status {
-        case errSecSuccess:
-            break
-        case errSecAuthFailed, errSecPkcs12VerifyFailure:
-            throw SigningError.p12Unreadable("密码错误")
-        default:
-            throw SigningError.p12Unreadable("导入失败（OSStatus \(status)）")
-        }
-
-        guard let items = rawItems as? [[String: Any]], let first = items.first else {
-            throw SigningError.p12Unreadable("文件里没有任何身份")
-        }
-
-        guard let identityRef = first[kSecImportItemIdentity as String] else {
-            throw SigningError.p12Unreadable("文件里没有可用的签名身份")
-        }
-
-        // 走一个桥接把 CFTypeRef 转成 SecIdentity
-        let identity = identityRef as! SecIdentity
-        var certificate: SecCertificate?
-        guard SecIdentityCopyCertificate(identity, &certificate) == errSecSuccess,
-              let cert = certificate else {
-            throw SigningError.p12Unreadable("无法从身份中取出证书")
-        }
-
-        var cfCommonName: CFString?
-        let nameStatus = SecCertificateCopyCommonName(cert, &cfCommonName)
-        let commonName = (nameStatus == errSecSuccess ? cfCommonName as String? : nil)
-            ?? "未命名证书"
-
-        let fields = subjectFields(of: cert)
-        let teamID = fields["Organizational Unit"] ?? ""
-        let validity = validityDates(of: cert)
 
         return IdentityInfo(
-            commonName: commonName,
-            teamID: teamID,
-            notBefore: validity?.notBefore ?? Date.distantPast,
-            notAfter: validity?.notAfter ?? Date.distantPast
+            commonName: info.commonName.isEmpty ? "未命名证书" : info.commonName,
+            teamID: info.teamID,
+            notBefore: info.notBefore,
+            notAfter: info.notAfter
         )
-    }
-
-    private static func subjectFields(of cert: SecCertificate) -> [String: String] {
-        let keys = [kSecOIDX509V1SubjectName] as CFArray
-        guard let dict = SecCertificateCopyValues(cert, keys, nil) as? [String: Any],
-              let entry = dict[kSecOIDX509V1SubjectName as String] as? [String: Any],
-              let values = entry[kSecPropertyKeyValue as String] as? [[String: Any]] else {
-            return [:]
-        }
-
-        var result: [String: String] = [:]
-        for item in values {
-            guard let label = item[kSecPropertyKeyLabel as String] as? String else { continue }
-            if let value = item[kSecPropertyKeyValue as String] as? String {
-                result[label] = value
-            } else if let value = item[kSecPropertyKeyValue as String] as? [String: Any],
-                      let inner = value["value"] as? String {
-                result[label] = inner
-            }
-        }
-        return result
-    }
-
-    private static func validityDates(of cert: SecCertificate) -> (notBefore: Date, notAfter: Date)? {
-        let keys = [
-            kSecOIDX509V1ValidityNotBefore,
-            kSecOIDX509V1ValidityNotAfter
-        ] as CFArray
-
-        guard let dict = SecCertificateCopyValues(cert, keys, nil) as? [String: Any] else {
-            return nil
-        }
-
-        func extract(_ oid: CFString) -> Date? {
-            guard let entry = dict[oid as String] as? [String: Any],
-                  let raw = entry[kSecPropertyKeyValue as String] else { return nil }
-
-            if let date = raw as? Date { return date }
-
-            // 有些系统返回的是格式化字符串
-            if let text = raw as? String {
-                let formatter = DateFormatter()
-                formatter.locale = Locale(identifier: "en_US_POSIX")
-                formatter.dateFormat = "yyyy-MM-dd HH:mm:ss Z"
-                if let date = formatter.date(from: text) { return date }
-                formatter.dateFormat = "MMM d HH:mm:ss yyyy zzz"
-                return formatter.date(from: text)
-            }
-            return nil
-        }
-
-        guard let before = extract(kSecOIDX509V1ValidityNotBefore),
-              let after  = extract(kSecOIDX509V1ValidityNotAfter) else { return nil }
-
-        return (before, after)
     }
 }

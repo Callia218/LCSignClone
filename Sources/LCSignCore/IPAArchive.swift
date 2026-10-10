@@ -25,7 +25,7 @@ public enum IPAArchive {
         try? fm.removeItem(at: directory)
         try fm.createDirectory(at: directory, withIntermediateDirectories: true)
 
-        guard let archive = Archive(url: ipa, accessMode: .read) else {
+        guard let archive = try? Archive(url: ipa, accessMode: .read, pathEncoding: nil) else {
             throw SigningError.noAppBundleInArchive
         }
 
@@ -48,6 +48,11 @@ public enum IPAArchive {
                 try fm.createDirectory(at: destination.deletingLastPathComponent(),
                                        withIntermediateDirectories: true)
                 _ = try archive.extract(entry, to: destination)
+
+            case .symlink:
+                // 正常的 IPA 里不该出现符号链接。出现了就跳过 ——
+                // 链接目标可能指向容器外，是典型的路径逃逸手法。
+                continue
 
             @unknown default:
                 continue
@@ -104,7 +109,7 @@ public enum IPAArchive {
                                withIntermediateDirectories: true)
         try? fm.removeItem(at: ipa)
 
-        guard let archive = Archive(url: ipa, accessMode: .create) else {
+        guard let archive = try? Archive(url: ipa, accessMode: .create, pathEncoding: nil) else {
             throw SigningError.packagingFailed("无法创建归档文件")
         }
 
@@ -132,11 +137,20 @@ public enum IPAArchive {
         guard !relative.isEmpty else { return }
         relative += "/"
 
+        // 目录条目本身不带数据，但必须显式写进归档 —— 否则空目录会在
+        // 解包时消失（iOS 的 .app 里有不少空目录）。
+        //
+        // 这里两个参数是刻意写死的：
+        //   - uncompressedSize 用 Int64(0) 而不是 0：ZIPFoundation 里同时存在
+        //     `uncompressedSize: Int64`（新）与 `UInt32`（已废弃）两个重载，
+        //     传整数字面量会让编译器无法选择。
+        //   - provider 闭包显式标注参数类型，进一步锁定到新重载
+        //     （废弃版的闭包签名是 (Int, Int)）。
         try archive.addEntry(with: relative,
                              type: .directory,
-                             uncompressedSize: 0,
+                             uncompressedSize: Int64(0),
                              compressionMethod: .none,
-                             provider: { _, _ in Data() })
+                             provider: { (_: Int64, _: Int) throws -> Data in Data() })
 
         let children = try fm.contentsOfDirectory(
             at: directory,

@@ -8,12 +8,26 @@ NSString * const ZSignErrorDomain = @"com.example.lcsigncore.zsign";
 
 static NSError *MakeError(ZSignErrorCode code, NSString *message, NSString *suggestion) {
     NSMutableDictionary *info = [NSMutableDictionary dictionary];
-    info[NSLocalizedDescriptionKey] = message;
+    info[NSLocalizedDescriptionKey] = message ?: @"未知错误";
     if (suggestion.length > 0) {
         info[NSLocalizedRecoverySuggestionErrorKey] = suggestion;
     }
     return [NSError errorWithDomain:ZSignErrorDomain code:code userInfo:info];
 }
+
+#pragma mark - ZSignP12Info
+
+@interface ZSignP12Info ()
+@property (nonatomic, copy, readwrite) NSString *commonName;
+@property (nonatomic, copy, readwrite) NSString *teamID;
+@property (nonatomic, strong, readwrite) NSDate *notBefore;
+@property (nonatomic, strong, readwrite) NSDate *notAfter;
+@end
+
+@implementation ZSignP12Info
+@end
+
+#pragma mark - ZSignBridge
 
 @implementation ZSignBridge
 
@@ -112,6 +126,78 @@ static NSError *MakeError(ZSignErrorCode code, NSString *message, NSString *sugg
     }
 
     return YES;
+}
+
++ (ZSignP12Info *)inspectP12AtPath:(NSString *)p12Path
+                          password:(NSString *)password
+                             error:(NSError **)error
+{
+    NSFileManager *fm = NSFileManager.defaultManager;
+
+    if (p12Path.length == 0 || ![fm fileExistsAtPath:p12Path]) {
+        if (error) {
+            *error = MakeError(ZSignErrorFileNotFound,
+                               @"找不到 p12 证书文件。",
+                               p12Path.length > 0
+                                   ? [NSString stringWithFormat:@"路径：%@", p12Path]
+                                   : nil);
+        }
+        return nil;
+    }
+
+    zsign_shim_p12_info info;
+    char *errorMessage = NULL;
+
+    const int result = zsign_shim_inspect_p12(
+        p12Path.UTF8String,
+        (password ?: @"").UTF8String,
+        &info,
+        &errorMessage
+    );
+
+    if (result != 1) {
+        NSString *message = (errorMessage != NULL)
+            ? [NSString stringWithUTF8String:errorMessage]
+            : @"p12 解析失败。";
+
+        if (errorMessage != NULL) {
+            zsign_shim_free(errorMessage);
+        }
+
+        if (error) {
+            *error = MakeError(ZSignErrorBadCredentials,
+                               message ?: @"p12 解析失败。",
+                               @"确认导出密码正确。可用命令验证：\n"
+                               @"openssl pkcs12 -in cert.p12 -noout -passin pass:你的密码");
+        }
+        return nil;
+    }
+
+    ZSignP12Info *parsed = [[ZSignP12Info alloc] init];
+
+    if (info.common_name != NULL) {
+        parsed.commonName = [NSString stringWithUTF8String:info.common_name] ?: @"";
+    } else {
+        parsed.commonName = @"";
+    }
+
+    if (info.team_id != NULL) {
+        parsed.teamID = [NSString stringWithUTF8String:info.team_id] ?: @"";
+    } else {
+        parsed.teamID = @"";
+    }
+
+    parsed.notBefore = (info.not_before > 0.0)
+        ? [NSDate dateWithTimeIntervalSince1970:info.not_before]
+        : NSDate.distantPast;
+    parsed.notAfter = (info.not_after > 0.0)
+        ? [NSDate dateWithTimeIntervalSince1970:info.not_after]
+        : NSDate.distantPast;
+
+    // 结构体里的字符串由 shim 分配，读完必须还回去
+    zsign_shim_free_p12_info(&info);
+
+    return parsed;
 }
 
 @end

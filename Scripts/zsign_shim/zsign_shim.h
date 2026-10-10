@@ -8,6 +8,9 @@
  * 编译单元，一旦 OpenSSL 头文件路径对不上就编译失败。
  *
  * 这一层把依赖封在 .cpp 里，对外只暴露 C ABI，桥接层因此完全干净。
+ *
+ * 本文件是**唯一来源**：10_build_zsign.sh 编译它，并把它拷到
+ * Vendor/zsign/include/ 供 Xcode 侧的桥接层 include。
  */
 
 #ifndef ZSIGN_SHIM_H
@@ -16,6 +19,10 @@
 #ifdef __cplusplus
 extern "C" {
 #endif
+
+/* ==========================================================================
+ * 签名
+ * ========================================================================== */
 
 /*
  * 对已解包的 .app 目录执行签名。
@@ -47,7 +54,45 @@ int zsign_shim_sign_folder(const char *folder,
                            int dylib_count,
                            char **error_out);
 
-/* 释放 zsign_shim_sign_folder 写出的错误字符串 */
+/* ==========================================================================
+ * p12 解析
+ *
+ * iOS 上没有 SecCertificateCopyValues / kSecOIDX509V1Validity* 这些 API
+ * （它们是 macOS 独有的），拿不到证书的 Team ID 和有效期。
+ * 与其在 Swift 侧堆平台分支，不如复用 zsign 已经链进来的 OpenSSL。
+ * ========================================================================== */
+
+/*
+ * 从 p12 里读出的证书信息。
+ * 两个字符串由本层分配，用完必须调 zsign_shim_free_p12_info 释放。
+ * 时间为 Unix 时间戳（秒），解析失败时为 0。
+ */
+typedef struct {
+    char  *common_name;   /* 证书 subject 的 CN，用于展示 */
+    char  *team_id;       /* 证书 subject 的 OU，即 Apple Team ID */
+    double not_before;
+    double not_after;
+} zsign_shim_p12_info;
+
+/*
+ * 解析 p12，读取证书 CN / Team ID / 有效期。
+ *
+ * p12_path    p12 文件路径
+ * password    导出密码，可为 NULL（等同于空串）
+ * info_out    输出参数，必须非 NULL。无论成功失败都会被清零或填好
+ * error_out   失败时写入错误信息（需用 zsign_shim_free 释放），可为 NULL
+ *
+ * 返回 1 表示成功，0 表示失败。
+ */
+int zsign_shim_inspect_p12(const char *p12_path,
+                           const char *password,
+                           zsign_shim_p12_info *info_out,
+                           char **error_out);
+
+/* 释放 zsign_shim_inspect_p12 填出的内容（可安全重复调用） */
+void zsign_shim_free_p12_info(zsign_shim_p12_info *info);
+
+/* 释放本层写出的错误字符串 */
 void zsign_shim_free(char *ptr);
 
 #ifdef __cplusplus

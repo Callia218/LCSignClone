@@ -40,7 +40,10 @@ targets:
     type: framework
     platform: iOS
     sources:
+      # 一把梭全收：Swift 源码 + ObjC++ 桥接 + include/ 下的公开头文件。
+      # headerVisibility 默认就是 public，显式写出来是为了别让以后有人改错。
       - path: Sources/LCSignCore
+        headerVisibility: public
     dependencies:
       - package: ZIPFoundation
       - package: OpenSSL
@@ -49,13 +52,20 @@ targets:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.example.lcsigncore
         PRODUCT_NAME: LCSignCore
+        # 混合语言 framework 的关键开关：置 Yes 后 Xcode 会为 framework 生成
+        # 模块映射，并把 include/LCSignCore.h 当作伞形头文件 —— Swift 侧因此
+        # 能直接看到 ZSignBridge，而不需要（framework 也不支持）桥接头。
         DEFINES_MODULE: YES
         SKIP_INSTALL: NO
-        # 由 10_build_zsign.sh 生成的产物。
-        # 桥接层只 include zsign_shim.h（纯 C），zsign 的 C++ 头文件依赖
-        # （bundle.h / openssl.h / json.h）被封在静态库内部，不会漏进来。
+        # 头文件搜索路径。桥接层只 include zsign_shim.h（纯 C），zsign 的 C++
+        # 头文件依赖（bundle.h / openssl.h / json.h）被封在静态库内部，不会漏进来。
+        #   - Vendor/zsign/include   由 10_build_zsign.sh 拷出来的产物
+        #   - Scripts/zsign_shim     shim 的源头，脚本没跑时也能兜住
+        #   - Sources/.../include    ZSignBridge.h 与伞形头文件所在目录
         HEADER_SEARCH_PATHS:
           - "$(SRCROOT)/Vendor/zsign/include"
+          - "$(SRCROOT)/Scripts/zsign_shim"
+          - "$(SRCROOT)/Sources/LCSignCore/include"
         LIBRARY_SEARCH_PATHS:
           - "$(SRCROOT)/Vendor/zsign/lib"
         # OpenSSL 由 SwiftPM 提供；这里链接 zsign 静态库、C++ 运行时与压缩库

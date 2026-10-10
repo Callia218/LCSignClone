@@ -167,10 +167,16 @@ LCSignClone/
         ├── SigningCertificate.swift  证书模型（含有效期）
         ├── ProvisioningProfile.swift 描述文件解析
         ├── IPAArchive.swift          IPA 解包/打包
-        └── ZSign/
-            ├── include/ZSignBridge.h Objective-C++ 桥接头
-            └── ZSignBridge.mm        桥接 zsign C++ API
+        ├── include/
+        │   ├── LCSignCore.h          伞形头文件（umbrella header）
+        │   └── ZSignBridge.h         Objective-C++ 桥接接口
+        └── ZSignBridge.mm            桥接 zsign C++ API
 ```
+
+> **为什么是伞形头文件而不是桥接头**：framework target 不支持桥接头
+> （Xcode 直接报 `using bridging headers with framework targets is unsupported`）。
+> Apple 给 framework 的做法是 `DEFINES_MODULE = YES` + 把要暴露给 Swift 的
+> ObjC 头文件 import 进伞形头文件 `LCSignCore.h`。文件名必须与模块名一致。
 
 ---
 
