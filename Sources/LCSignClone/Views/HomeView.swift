@@ -1,3 +1,4 @@
+import LCSignCore
 import SwiftUI
 import UIKit
 
@@ -9,6 +10,32 @@ struct HomeView: View {
     @State private var showingCertificates = false
 
     var body: some View {
+        navigationContent
+            .navigationViewStyle(.stack)
+            .task {
+                await model.refreshCertificates()
+            }
+            .alert(
+                model.alert?.title ?? "",
+                isPresented: isShowingAlert,
+                presenting: model.alert
+            ) { _ in
+                Button("好", role: .cancel) {}
+            } message: { payload in
+                Text(payload.message)
+            }
+    }
+
+    /// 拆出来单独算：直接写在 body 里会让类型检查器在
+    /// NavigationView + toolbar + sheet + alert 的链式调用上超时。
+    private var isShowingAlert: Binding<Bool> {
+        Binding(
+            get: { model.alert != nil },
+            set: { if !$0 { model.alert = nil } }
+        )
+    }
+
+    private var navigationContent: some View {
         NavigationView {
             Group {
                 if model.tasks.isEmpty {
@@ -18,23 +45,7 @@ struct HomeView: View {
                 }
             }
             .navigationTitle("LCSign")
-            .toolbar {
-                ToolbarItem(placement: .navigationBarLeading) {
-                    Button {
-                        showingCertificates = true
-                    } label: {
-                        Label("证书", systemImage: "key.fill")
-                    }
-                }
-                ToolbarItem(placement: .navigationBarTrailing) {
-                    Button {
-                        showingSignSheet = true
-                    } label: {
-                        Label("签名", systemImage: "plus.circle.fill")
-                    }
-                    .disabled(model.certificates.isEmpty)
-                }
-            }
+            .toolbar { toolbarContent }
             .sheet(isPresented: $showingSignSheet) {
                 SignSheet()
             }
@@ -42,21 +53,24 @@ struct HomeView: View {
                 CertificateListView()
             }
         }
-        .navigationViewStyle(.stack)
-        .task {
-            await model.refreshCertificates()
+    }
+
+    @ToolbarContentBuilder
+    private var toolbarContent: some ToolbarContent {
+        ToolbarItem(placement: .navigationBarLeading) {
+            Button {
+                showingCertificates = true
+            } label: {
+                Label("证书", systemImage: "key.fill")
+            }
         }
-        .alert(
-            model.alert?.title ?? "",
-            isPresented: Binding(
-                get: { model.alert != nil },
-                set: { if !$0 { model.alert = nil } }
-            ),
-            presenting: model.alert
-        ) { _ in
-            Button("好", role: .cancel) {}
-        } message: { payload in
-            Text(payload.message)
+        ToolbarItem(placement: .navigationBarTrailing) {
+            Button {
+                showingSignSheet = true
+            } label: {
+                Label("签名", systemImage: "plus.circle.fill")
+            }
+            .disabled(model.certificates.isEmpty)
         }
     }
 

@@ -88,14 +88,28 @@ public actor SigningService {
             }
         }
 
-        // ---- 4. entitlements 授权校验（闪退头号原因，提前拦） ----
-        if let profile {
+        // ---- 4. entitlements 授权校验 ----
+        //
+        // 只对**用户显式传入的** entitlements 做硬校验。
+        //
+        // 默认路径下能拿到的只有源 App 自带描述文件里的权限，那些值天然带着
+        // 旧 Team / 旧 App ID（application-identifier、keychain-access-groups
+        // 之类），而 zsign 最后会按目标描述文件重新写入 —— 拿它去卡签名，
+        // 只要换了 Team 就会误杀合法请求。
+        //
+        // 而自定义 entitlements 是真正会导致「装得上、一打开就闪退」的场景：
+        // 里面多写一条描述文件没授权的键，iOS 就会在启动时直接杀掉进程。
+        if let profile, let customEntitlements = request.entitlements {
             report(onProgress, .inspecting, 0.32, "校验权限范围")
-            let requested = try resolveEntitlements(
-                request: request,
-                appBundle: contents.appBundle,
-                profile: profile
-            )
+
+            let data = try Data(contentsOf: customEntitlements)
+            guard let requested = try PropertyListSerialization
+                .propertyList(from: data, options: [], format: nil) as? [String: Any] else {
+                throw SigningError.profileUnreadable(
+                    "自定义 entitlements 不是有效的 plist 字典。"
+                )
+            }
+
             let unauthorized = profile.unauthorizedEntitlementKeys(in: requested)
             if !unauthorized.isEmpty {
                 throw SigningError.entitlementsNotAuthorized(unauthorized)
@@ -143,29 +157,6 @@ public actor SigningService {
                         _ fraction: Double,
                         _ detail: String) {
         sink(Progress(stage: stage, fraction: fraction, detail: detail))
-    }
-
-    /// 决定这次签名用哪套 entitlements。优先级：
-    /// 用户指定 > App 自带描述文件 > 目标描述文件
-    private func resolveEntitlements(request: SigningRequest,
-                                     appBundle: URL,
-                                     profile: ProvisioningProfile) throws -> [String: Any] {
-        if let url = request.entitlements {
-            let data = try Data(contentsOf: url)
-            if let dict = try PropertyListSerialization
-                .propertyList(from: data, options: [], format: nil) as? [String: Any] {
-                return dict
-            }
-        }
-
-        let embedded = appBundle.appendingPathComponent("embedded.mobileprovision")
-        if fileManager.fileExists(atPath: embedded.path),
-           let existing = try? ProvisioningProfile.parse(contentsOf: embedded),
-           !existing.entitlements.isEmpty {
-            return existing.entitlements
-        }
-
-        return profile.entitlements
     }
 
     /// 签名后自检：这三个东西缺任何一个，包都装不上

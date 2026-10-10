@@ -1,3 +1,4 @@
+import LCSignCore
 import SwiftUI
 
 @main

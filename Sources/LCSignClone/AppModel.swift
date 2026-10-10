@@ -1,4 +1,5 @@
 import Foundation
+import LCSignCore
 import SwiftUI
 import UniformTypeIdentifiers
 

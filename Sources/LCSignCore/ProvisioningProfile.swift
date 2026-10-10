@@ -61,31 +61,57 @@ public struct ProvisioningProfile: @unchecked Sendable {
         return bundleID == pattern
     }
 
+    /// 这几个键不参与授权比对 —— 它们天生绑定签名身份，签名时会被按描述文件
+    /// 重新写入，拿源 App 里带过来的旧值去比只会误判：
+    ///   - get-task-allow              开发描述文件里由系统管理
+    ///   - application-identifier      形如 TEAMID.bundleid，随 Team 变
+    ///   - team-identifier             同上
+    ///   - keychain-access-groups      取值形如 TEAMID.*，同样随 Team 变
+    private static let identityScopedEntitlementKeys: Set<String> = [
+        "get-task-allow",
+        "application-identifier",
+        "com.apple.developer.team-identifier",
+        "keychain-access-groups"
+    ]
+
     /// 找出目标 entitlements 里有哪些键**不在**本描述文件的授权范围内。
     ///
     /// 这是「签名成功但启动闪退」的头号原因，签名前必须先跑一遍。
     public func unauthorizedEntitlementKeys(in target: [String: Any]) -> [String] {
         target.keys.filter { key in
-            // get-task-allow 在开发描述文件里由系统管理，不参与比对
-            if key == "get-task-allow" { return false }
+            if Self.identityScopedEntitlementKeys.contains(key) { return false }
             guard let allowed = entitlements[key] else { return true }
             return !Self.valueAllowed(allowed, target[key])
         }.sorted()
     }
 
-    /// 宽松比较：数组按子集判断，字典递归，标量按相等
+    /// 宽松比较：数组按子集判断，字典递归，标量按相等。
+    ///
+    /// 字符串额外支持描述文件里的通配写法 —— `TEAMID.*`、`TEAMID.com.example.*`
+    /// 都是合法的 App ID / keychain group 形式，用严格相等比会把它们全判成越权。
     private static func valueAllowed(_ allowed: Any, _ requested: Any?) -> Bool {
         guard let requested else { return false }
 
-        if let a = allowed as? String, let b = requested as? String { return a == b }
+        if let a = allowed as? String, let b = requested as? String {
+            return stringAllowed(a, b)
+        }
         if let a = allowed as? Bool,   let b = requested as? Bool   { return a == b }
         if let a = allowed as? Int,    let b = requested as? Int    { return a == b }
 
         if let a = allowed as? [String], let b = requested as? [String] {
-            return Set(b).isSubset(of: Set(a))
+            return b.allSatisfy { item in a.contains { stringAllowed($0, item) } }
         }
         if let a = allowed as? [String: Any], let b = requested as? [String: Any] {
             return b.allSatisfy { valueAllowed(a[$0.key] as Any, $0.value) }
+        }
+        return false
+    }
+
+    /// 允许 `*` 结尾的通配前缀匹配
+    private static func stringAllowed(_ allowed: String, _ requested: String) -> Bool {
+        if allowed == requested { return true }
+        if allowed.hasSuffix("*") {
+            return requested.hasPrefix(String(allowed.dropLast()))
         }
         return false
     }
