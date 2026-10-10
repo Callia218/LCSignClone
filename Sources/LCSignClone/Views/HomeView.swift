@@ -1,0 +1,197 @@
+import SwiftUI
+import UIKit
+
+struct HomeView: View {
+
+    @EnvironmentObject private var model: AppModel
+
+    @State private var showingSignSheet = false
+    @State private var showingCertificates = false
+
+    var body: some View {
+        NavigationView {
+            Group {
+                if model.tasks.isEmpty {
+                    emptyState
+                } else {
+                    taskList
+                }
+            }
+            .navigationTitle("LCSign")
+            .toolbar {
+                ToolbarItem(placement: .navigationBarLeading) {
+                    Button {
+                        showingCertificates = true
+                    } label: {
+                        Label("证书", systemImage: "key.fill")
+                    }
+                }
+                ToolbarItem(placement: .navigationBarTrailing) {
+                    Button {
+                        showingSignSheet = true
+                    } label: {
+                        Label("签名", systemImage: "plus.circle.fill")
+                    }
+                    .disabled(model.certificates.isEmpty)
+                }
+            }
+            .sheet(isPresented: $showingSignSheet) {
+                SignSheet()
+            }
+            .sheet(isPresented: $showingCertificates) {
+                CertificateListView()
+            }
+        }
+        .navigationViewStyle(.stack)
+        .task {
+            await model.refreshCertificates()
+        }
+        .alert(
+            model.alert?.title ?? "",
+            isPresented: Binding(
+                get: { model.alert != nil },
+                set: { if !$0 { model.alert = nil } }
+            ),
+            presenting: model.alert
+        ) { _ in
+            Button("好", role: .cancel) {}
+        } message: { payload in
+            Text(payload.message)
+        }
+    }
+
+    // MARK: - 空状态
+
+    private var emptyState: some View {
+        VStack(spacing: 16) {
+            Image(systemName: "signature")
+                .font(.system(size: 52, weight: .light))
+                .foregroundColor(.secondary)
+
+            Text("还没有签名任务")
+                .font(.headline)
+
+            Text(model.certificates.isEmpty
+                 ? "先在左上角导入证书（p12 + 描述文件），然后点右上角选择 IPA。"
+                 : "点右上角选择要重签名的 IPA 文件。")
+                .font(.subheadline)
+                .foregroundColor(.secondary)
+                .multilineTextAlignment(.center)
+                .padding(.horizontal, 40)
+
+            if model.certificates.isEmpty {
+                Button {
+                    showingCertificates = true
+                } label: {
+                    Label("导入证书", systemImage: "key.fill")
+                }
+                .buttonStyle(.borderedProminent)
+                .padding(.top, 4)
+            }
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+
+    // MARK: - 任务列表
+
+    private var taskList: some View {
+        List {
+            Section {
+                ForEach(model.tasks) { task in
+                    TaskRow(task: task)
+                }
+            } header: {
+                Text("任务")
+            } footer: {
+                Text("签名产物保存在「文件」App → 我的 iPhone → LCSign → Signed 目录下。")
+            }
+        }
+        .listStyle(.insetGrouped)
+    }
+}
+
+// MARK: - 单条任务
+
+struct TaskRow: View {
+
+    let task: SigningTask
+
+    @State private var showingShare = false
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+
+            HStack(spacing: 10) {
+                statusIcon
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(task.name)
+                        .font(.system(size: 15, weight: .medium))
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                    Text(task.stage)
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                }
+                Spacer()
+            }
+
+            if task.isRunning {
+                ProgressView(value: task.fraction)
+                    .progressViewStyle(.linear)
+            }
+
+            if case .failed(let message) = task.status {
+                Text(message)
+                    .font(.caption)
+                    .foregroundColor(.red)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+
+            if let output = task.outputURL, task.status == .success {
+                Button {
+                    showingShare = true
+                } label: {
+                    Label("导出 IPA", systemImage: "square.and.arrow.up")
+                        .font(.caption)
+                }
+                .sheet(isPresented: $showingShare) {
+                    ActivityView(items: [output])
+                }
+            }
+        }
+        .padding(.vertical, 4)
+    }
+
+    @ViewBuilder
+    private var statusIcon: some View {
+        switch task.status {
+        case .running:
+            ProgressView()
+                .frame(width: 22, height: 22)
+        case .success:
+            Image(systemName: "checkmark.circle.fill")
+                .foregroundColor(.green)
+                .font(.system(size: 22))
+        case .failed:
+            Image(systemName: "exclamationmark.triangle.fill")
+                .foregroundColor(.orange)
+                .font(.system(size: 22))
+        }
+    }
+}
+
+// MARK: - 分享面板
+
+/// 用 UIActivityViewController 而不是 ShareLink —— 后者需要 iOS 16，
+/// 而本项目的 deployment target 是 15.0。
+struct ActivityView: UIViewControllerRepresentable {
+
+    let items: [Any]
+
+    func makeUIViewController(context: Context) -> UIActivityViewController {
+        UIActivityViewController(activityItems: items, applicationActivities: nil)
+    }
+
+    func updateUIViewController(_ controller: UIActivityViewController,
+                                context: Context) {}
+}

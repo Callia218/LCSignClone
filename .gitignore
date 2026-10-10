@@ -1,0 +1,20 @@
+# 构建产物
+.build/
+Vendor/
+build/
+out/
+DerivedData/
+*.xcworkspace/
+*.xcodeproj/
+build.log
+
+# 证书 —— 绝对不要提交
+*.p12
+*.mobileprovision
+*.cer
+cert.p12
+profile.mobileprovision
+
+# 系统
+.DS_Store
+Thumbs.db

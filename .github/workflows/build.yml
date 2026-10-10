@@ -1,0 +1,114 @@
+name: Build IPA
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: 构建 iOS App
+    runs-on: macos-14
+    timeout-minutes: 45
+
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+
+      - name: 选择 Xcode
+        run: |
+          latest="$(ls -d /Applications/Xcode_15*.app 2>/dev/null | sort -V | tail -1)"
+          if [ -z "$latest" ]; then latest="$(ls -d /Applications/Xcode*.app | sort -V | tail -1)"; fi
+          sudo xcode-select -s "$latest"
+          xcodebuild -version
+          xcrun --sdk iphoneos --show-sdk-version
+
+      - name: 安装构建工具
+        run: |
+          brew install xcodegen openssl@3
+
+      - name: 编译 zsign 静态库
+        run: bash Scripts/10_build_zsign.sh
+
+      - name: 生成 Xcode 工程
+        run: xcodegen generate
+
+      - name: 编译 App（不签名）
+        run: |
+          xcodebuild \
+            -project LCSignClone.xcodeproj \
+            -scheme LCSignClone \
+            -sdk iphoneos \
+            -configuration Release \
+            -derivedDataPath build \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY="" \
+            build \
+            | tee build.log | tail -40
+
+      - name: 打包未签名 IPA
+        run: |
+          APP="build/Build/Products/Release-iphoneos/LCSignClone.app"
+          if [ ! -d "$APP" ]; then
+            echo "::error::构建产物不存在，看上面的 xcodebuild 输出"
+            exit 1
+          fi
+          rm -rf out && mkdir -p out/Payload
+          cp -R "$APP" out/Payload/
+          ( cd out && zip -qry ../LCSignClone-unsigned.ipa Payload )
+          ls -lh LCSignClone-unsigned.ipa
+
+      - name: 检查签名密钥是否已配置
+        id: cert
+        run: |
+          if [ -n "${{ secrets.P12_BASE64 }}" ] && [ -n "${{ secrets.PROVISION_BASE64 }}" ]; then
+            echo "available=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "available=false" >> "$GITHUB_OUTPUT"
+            echo "未配置签名密钥，只产出未签名 IPA"
+          fi
+
+      - name: 用证书签名
+        if: steps.cert.outputs.available == 'true'
+        env:
+          P12_BASE64: ${{ secrets.P12_BASE64 }}
+          PROVISION_BASE64: ${{ secrets.PROVISION_BASE64 }}
+          P12_PASSWORD: ${{ secrets.P12_PASSWORD }}
+        run: |
+          printf '%s' "$P12_BASE64" | base64 -d > cert.p12
+          printf '%s' "$PROVISION_BASE64" | base64 -d > profile.mobileprovision
+
+          bash Scripts/20_resign_cli.sh \
+            --ipa  LCSignClone-unsigned.ipa \
+            --p12  cert.p12 \
+            --pass "$P12_PASSWORD" \
+            --prov profile.mobileprovision \
+            --out  LCSignClone-signed.ipa
+
+          rm -f cert.p12 profile.mobileprovision
+          ls -lh LCSignClone-signed.ipa
+
+      - name: 上传产物
+        uses: actions/upload-artifact@v4
+        with:
+          name: LCSignClone-ipa
+          path: |
+            LCSignClone-unsigned.ipa
+            LCSignClone-signed.ipa
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: 构建日志（失败时）
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-log
+          path: build.log
+          if-no-files-found: ignore
+          retention-days: 7

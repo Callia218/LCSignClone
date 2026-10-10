@@ -1,0 +1,113 @@
+name: LCSignClone
+
+options:
+  bundleIdPrefix: com.example
+  deploymentTarget:
+    iOS: "15.0"
+  createIntermediateGroups: true
+  groupSortPosition: top
+  generateEmptyDirectories: true
+
+settings:
+  base:
+    SWIFT_VERSION: "5.9"
+    IPHONEOS_DEPLOYMENT_TARGET: "15.0"
+    ENABLE_BITCODE: NO
+    CLANG_CXX_LANGUAGE_STANDARD: "c++17"
+    CLANG_CXX_LIBRARY: "libc++"
+    GCC_ENABLE_CPP_EXCEPTIONS: YES
+    GCC_ENABLE_CPP_RTTI: YES
+    # 首次运行请改成你自己的 Team ID，或留空走自动签名
+    DEVELOPMENT_TEAM: ""
+    CODE_SIGN_STYLE: Automatic
+
+packages:
+  ZIPFoundation:
+    url: https://github.com/weichsel/ZIPFoundation
+    from: 0.9.19
+  # zsign 依赖 OpenSSL。用 SwiftPM 引入，Xcode 会自动处理 iOS 版链接，
+  # 省掉自己交叉编译 OpenSSL 的麻烦。
+  OpenSSL:
+    url: https://github.com/krzyzanowskim/OpenSSL
+    from: 3.6.0
+
+targets:
+
+  # ---------------------------------------------------------------
+  # 核心层：签名逻辑，不含 UI
+  # ---------------------------------------------------------------
+  LCSignCore:
+    type: framework
+    platform: iOS
+    sources:
+      - path: Sources/LCSignCore
+    dependencies:
+      - package: ZIPFoundation
+      - package: OpenSSL
+        product: OpenSSL
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.example.lcsigncore
+        PRODUCT_NAME: LCSignCore
+        DEFINES_MODULE: YES
+        SKIP_INSTALL: NO
+        # 由 10_build_zsign.sh 生成的产物
+        HEADER_SEARCH_PATHS:
+          - "$(SRCROOT)/Vendor/zsign/include"
+        LIBRARY_SEARCH_PATHS:
+          - "$(SRCROOT)/Vendor/zsign/lib"
+        # OpenSSL 由 SwiftPM 提供，这里只链接 zsign 与系统库
+        OTHER_LDFLAGS:
+          - "-lzsign"
+          - "-lz"
+          - "-lbz2"
+        CLANG_ENABLE_OBJC_ARC: YES
+
+  # ---------------------------------------------------------------
+  # UI 层：SwiftUI App
+  # ---------------------------------------------------------------
+  LCSignClone:
+    type: application
+    platform: iOS
+    sources:
+      - path: Sources/LCSignClone
+    dependencies:
+      - target: LCSignCore
+    info:
+      path: Sources/LCSignClone/Info.plist
+      properties:
+        CFBundleDisplayName: LCSign
+        CFBundleName: LCSignClone
+        CFBundleShortVersionString: "1.0"
+        CFBundleVersion: "1"
+        UILaunchScreen: {}
+        UIRequiredDeviceCapabilities:
+          - arm64
+        UISupportedInterfaceOrientations:
+          - UIInterfaceOrientationPortrait
+          - UIInterfaceOrientationLandscapeLeft
+          - UIInterfaceOrientationLandscapeRight
+        # 让「文件」App 能直接投递 IPA 进来
+        UIFileSharingEnabled: true
+        LSSupportsOpeningDocumentsInPlace: true
+        CFBundleDocumentTypes:
+          - CFBundleTypeName: iOS App Archive
+            CFBundleTypeRole: Viewer
+            LSHandlerRank: Default
+            LSItemContentTypes:
+              - com.apple.itunes.ipa
+              - public.archive
+        UTImportedTypeDeclarations:
+          - UTTypeIdentifier: com.apple.itunes.ipa
+            UTTypeDescription: iOS App Archive
+            UTTypeConformsTo:
+              - public.data
+              - public.archive
+            UTTypeTagSpecification:
+              public.filename-extension:
+                - ipa
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.example.lcsignclone
+        PRODUCT_NAME: LCSignClone
+        TARGETED_DEVICE_FAMILY: "1,2"
