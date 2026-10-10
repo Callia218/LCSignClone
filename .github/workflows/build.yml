@@ -22,8 +22,12 @@ jobs:
 
       - name: 选择 Xcode
         run: |
-          latest="$(ls -d /Applications/Xcode_15*.app 2>/dev/null | sort -V | tail -1)"
-          if [ -z "$latest" ]; then latest="$(ls -d /Applications/Xcode*.app | sort -V | tail -1)"; fi
+          echo "可用 Xcode："
+          ls -d /Applications/Xcode*.app
+          # 必须用最新的 Xcode：xcodegen 2.46 生成的是 Xcode 16 的工程格式
+          # (objectVersion 77)，Xcode 15 会报 "future Xcode project file format"。
+          latest="$(ls -d /Applications/Xcode*.app | sort -V | tail -1)"
+          echo "选用：$latest"
           sudo xcode-select -s "$latest"
           xcodebuild -version
           xcrun --sdk iphoneos --show-sdk-version
@@ -40,6 +44,9 @@ jobs:
 
       - name: 编译 App（不签名）
         run: |
+          # pipefail 不能省：否则管道的退出码取自末尾的 tail，
+          # xcodebuild 失败会被吞掉，要到下一步才发现产物不存在
+          set -o pipefail
           xcodebuild \
             -project LCSignClone.xcodeproj \
             -scheme LCSignClone \
@@ -49,8 +56,7 @@ jobs:
             CODE_SIGNING_ALLOWED=NO \
             CODE_SIGNING_REQUIRED=NO \
             CODE_SIGN_IDENTITY="" \
-            build \
-            | tee build.log | tail -40
+            build 2>&1 | tee build.log | tail -60
 
       - name: 打包未签名 IPA
         run: |
