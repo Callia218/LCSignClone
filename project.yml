@@ -94,13 +94,34 @@ targets:
       - path: Sources/LCSignClone
     dependencies:
       - target: LCSignCore
+      # ---- OpenSSL 必须在这里再声明一次 ----
+      #
+      # SwiftPM 的 OpenSSL 产物是**动态框架**（OpenSSL.xcframework 里就是
+      # OpenSSL.framework），LCSignCore 链接了它，所以 App 包里必须有它。
+      #
+      # 只声明在 LCSignCore 上是不够的：Xcode **不会**递归嵌入「被嵌入框架」
+      # 的动态依赖，于是没有任何 target 负责把它拷进 .app/Frameworks。
+      # 症状极具迷惑性 —— xcodebuild 一切正常、IPA 也能正常打出来，
+      # 但装到设备上一打开就被 dyld 终止：
+      #
+      #   termination: namespace=DYLD, indicator="Library missing"
+      #   Library not loaded: @rpath/OpenSSL.framework/OpenSSL
+      #   Referenced from: .../LCSignCore.framework/LCSignCore
+      #
+      # 声明在 application target 上，XcodeGen 的 embed 默认就是 true，
+      # 会生成 Embed Frameworks 阶段把它拷进去。Scripts/30_verify_bundle.py
+      # 会在 CI 里把这类漏嵌拦下来。
+      - package: OpenSSL
+        product: OpenSSL
+        embed: true
     info:
       path: Sources/LCSignClone/Info.plist
       properties:
         CFBundleDisplayName: LCSign
         CFBundleName: LCSignClone
         CFBundleShortVersionString: "1.0"
-        CFBundleVersion: "1"
+        # 每次出可安装的包都往上加 1，方便在设备上和崩溃日志里区分版本
+        CFBundleVersion: "2"
         UILaunchScreen: {}
         UIRequiredDeviceCapabilities:
           - arm64

@@ -73,6 +73,13 @@ jobs:
           ( cd out && zip -qry ../LCSignClone-unsigned.ipa Payload )
           ls -lh LCSignClone-unsigned.ipa
 
+      # 放在打包之后、上传之前，是刻意的：包不完整就不该被发出去。
+      # 这一步拦的是「链接得上但打包后运行时找不到」的动态依赖
+      # （踩过一次：SwiftPM 的 OpenSSL 是动态框架，没被嵌进 App 包，
+      #  装到设备上启动即退，报 DYLD "Library missing"）。
+      - name: 校验包完整性
+        run: python3 Scripts/30_verify_bundle.py LCSignClone-unsigned.ipa
+
       - name: 检查签名密钥是否已配置
         id: cert
         run: |

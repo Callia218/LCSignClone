@@ -23,14 +23,19 @@ git push -u origin main
 1. 在 macOS runner 上编译 zsign 静态库（真机 + 模拟器两个切片）
 2. 生成 Xcode 工程并编译 App
 3. 产出 **未签名 IPA**（`LCSignClone-unsigned.ipa`）
-4. 如果你配了证书密钥，同时产出 **已签名 IPA**（`LCSignClone-signed.ipa`）
-5. 在模拟器上跑单元测试（描述文件解析、entitlements 比对、IPA 往返、
+4. **校验包完整性**（`Scripts/30_verify_bundle.py`）—— 逐个解析包内 Mach-O 的
+   动态依赖，确认每一个都能在包内解析到实体文件。这一步拦的是
+   「链接得上、装上去一打开就退」这类问题，见 6.6
+5. 如果你配了证书密钥，同时产出 **已签名 IPA**（`LCSignClone-signed.ipa`）
+6. 在模拟器上跑单元测试（描述文件解析、entitlements 比对、IPA 往返、
    以及一次真实的 ad-hoc 签名）
 
 在 Actions 页面 → 对应那次运行 → 底部 **Artifacts** 下载即可。
 
-> 第 5 步排在产物上传之后，是刻意的：测试红了也要先把 IPA 留下来，
+> 第 6 步排在产物上传之后，是刻意的：测试红了也要先把 IPA 留下来，
 > 不然一次测试失败会把能用的包一起吞掉。所以看到红叉先看是哪一步红的。
+>
+> 第 4 步则刻意排在打包之后、上传之前：包不完整就不该被发出去。
 
 ### 想让 CI 直接帮你签好
 
@@ -171,6 +176,9 @@ plist 树形编辑器、软件源解析、备份格式、插件系统、灵动�
 第一次用真机跑这个 App，别急着导证书 —— 先点右上角的**诊断**，
 跑一次引擎自检。
 
+> 前提是 App 得能打开。如果**点开图标就闪退**，那跟证书、跟引擎都没关系，
+> 是包本身缺了动态依赖，看 6.6。
+
 自检**不需要任何证书**，它会临时构造一个 .app（可执行文件用的是
 `LCSignCore.framework` 自己那段真实的 Mach-O），完整跑一遍
 「打包 → 解包 → ad-hoc 签名 → 校验 `_CodeSignature/CodeResources`」。
@@ -201,6 +209,7 @@ LCSignClone/
 │   ├── 00_check_env.sh               环境检查
 │   ├── 10_build_zsign.sh             编译 zsign 静态库（真机 + 模拟器）
 │   ├── 20_resign_cli.sh              阶段 0：命令行重签
+│   ├── 30_verify_bundle.py           IPA 包完整性校验（动态依赖 + Info.plist）
 │   └── zsign_shim/                   zsign C++ 引擎的纯 C 门面（唯一来源）
 │       ├── zsign_shim.h
 │       └── zsign_shim.cpp
@@ -291,6 +300,55 @@ iOS App 无法把文件写进 `/Applications`，也无法 fork 子进程。
 签名是 CPU 密集操作（RSA + 逐文件 SHA256），几百 MB 的包可能耗时数十秒。
 必须放到后台线程并给进度反馈，否则主线程卡死被系统杀掉。
 `SigningService` 已用 `actor` 隔离。
+
+### 6.6 动态依赖没被嵌进 App 包（装上去一打开就退）
+
+**这是本项目实际踩过的坑，也是最难自查的一类**：构建全程绿灯、IPA 也能正常打出来，
+但装到设备上一打开就被 dyld 终止，崩溃日志里长这样：
+
+```
+Exception Type:  EXC_CRASH (SIGABRT)
+Termination Reason: DYLD, [0x1] Library missing
+  Library not loaded: @rpath/OpenSSL.framework/OpenSSL
+  Referenced from: /var/containers/Bundle/Application/.../LCSignClone.app/Frameworks/LCSignCore.framework/LCSignCore
+  Reason: tried: '.../LCSignClone.app/Frameworks/OpenSSL.framework/OpenSSL' (no such file)
+```
+
+根因：SwiftPM 的 `krzyzanowskim/OpenSSL` 产物是**动态框架**，而
+`LCSignCore` 链接了它。`xcodebuild` 只保证「链接时找得到」（从 DerivedData 里），
+**不保证「打包后运行时还找得到」**；而 Xcode 也**不会**递归嵌入「被嵌入框架」的动态依赖。
+只把 OpenSSL 声明在 `LCSignCore` 上，就没有任何 target 负责把它拷进 `.app/Frameworks/`。
+
+修法是在 **application target** 上也声明一次（见 `project.yml`）：
+
+```yaml
+dependencies:
+  - target: LCSignCore
+  - package: OpenSSL
+    product: OpenSSL
+    embed: true      # 注意：对 package 依赖，embed 默认是 false，必须显式写
+```
+
+两个容易踩的点：
+
+- XcodeGen 对 **target 依赖**的 `embed` 有 `?? target.type.shouldEmbed(...)` 兜底
+  （application target 默认 true），但对 **package 依赖**是严格判断
+  `if dependency.embed == true`（`PBXProjGenerator.swift` 第 986 行）。
+  也就是说 package 依赖**不写 `embed: true` 就是 false**，不存在「application target 自动嵌」这回事。
+- `EngineSelfTest` 抓不到这个错。它测的是「合成 .app 的 ad-hoc 签名」，
+  压根不涉及动态框架嵌入 —— 引擎再健康，包还是缺文件。
+  所以必须另加一步**静态**校验：`Scripts/30_verify_bundle.py`。
+
+自查手法（不依赖 macOS）：
+
+```bash
+# 看包内某个 Mach-O 依赖了什么
+python3 Scripts/30_verify_bundle.py 你的包.ipa
+```
+
+它会逐个解析 `LC_LOAD_DYLIB` / `LC_LOAD_WEAK_DYLIB` / `LC_REEXPORT_DYLIB` 等加载命令，
+把 `@rpath/` `@loader_path/` `@executable_path/` 三类前缀按包内布局解析一遍，
+解析不到就报红并退出码 1。CI 里已经接上这一步。
 
 ---
 
