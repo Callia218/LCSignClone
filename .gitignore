@@ -21,3 +21,7 @@ profile.mobileprovision
 # 系统
 .DS_Store
 Thumbs.db
+
+# Python（Scripts/ 下有几个纯 Python 工具）
+__pycache__/
+*.pyc

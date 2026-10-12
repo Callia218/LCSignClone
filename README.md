@@ -325,16 +325,36 @@ Termination Reason: DYLD, [0x1] Library missing
 dependencies:
   - target: LCSignCore
   - package: OpenSSL
-    product: OpenSSL
-    embed: true      # 注意：对 package 依赖，embed 默认是 false，必须显式写
+    product: OpenSSL      # 注意：不要写 embed: true，见下
 ```
 
-两个容易踩的点：
+Xcode 会把链接进来的 **xcframework binaryTarget** 自己嵌进 `.app/Frameworks/`
+（实测构建日志里源路径就是
+`SourcePackages/checkouts/OpenSSL/Frameworks/OpenSSL.xcframework/ios-arm64/OpenSSL.framework`）。
 
+三个容易踩的点：
+
+- **千万不要加 `embed: true`。** 这是最容易走的弯路（我们走过一遍）。
+  XcodeGen 的 embed 条目生成的是 `productRef` 形式的构建文件
+  （`PBXBuildFile(product:)` → `productRef`，见 XcodeProj 的
+  `PBXBuildFile.swift` 第 72–78 行），放进 Embed Frameworks 阶段后，
+  Xcode 会把**产品名当成字面路径**去找 `$(BUILT_PRODUCTS_DIR)/OpenSSL`，
+  而真实产物在 `PackageFrameworks/OpenSSL.framework`，于是直接报：
+
+  ```
+  error: .../Release-iphoneos/OpenSSL: No such file or directory
+  ```
+
+  结果就是同一个产品出现**两条拷贝**：Xcode 自己那条（对，源路径是
+  xcframework 切片）和 XcodeGen 那条（错，源路径是 `$(BUILT_PRODUCTS_DIR)/OpenSSL`）。
+  `embed: true` 在这里既多余又有害。
 - XcodeGen 对 **target 依赖**的 `embed` 有 `?? target.type.shouldEmbed(...)` 兜底
   （application target 默认 true），但对 **package 依赖**是严格判断
   `if dependency.embed == true`（`PBXProjGenerator.swift` 第 986 行）。
-  也就是说 package 依赖**不写 `embed: true` 就是 false**，不存在「application target 自动嵌」这回事。
+  也就是说 package 依赖**不写 `embed: true` 就是 false** —— 所以
+  「application target 会自动嵌依赖」这个直觉对 package 依赖不成立。
+  注意这条说的是 XcodeGen **不替你做**，但 Xcode 自己会因为链接关系嵌入
+  xcframework binaryTarget，两件事不要混。
 - `EngineSelfTest` 抓不到这个错。它测的是「合成 .app 的 ad-hoc 签名」，
   压根不涉及动态框架嵌入 —— 引擎再健康，包还是缺文件。
   所以必须另加一步**静态**校验：`Scripts/30_verify_bundle.py`。
@@ -349,6 +369,12 @@ python3 Scripts/30_verify_bundle.py 你的包.ipa
 它会逐个解析 `LC_LOAD_DYLIB` / `LC_LOAD_WEAK_DYLIB` / `LC_REEXPORT_DYLIB` 等加载命令，
 把 `@rpath/` `@loader_path/` `@executable_path/` 三类前缀按包内布局解析一遍，
 解析不到就报红并退出码 1。CI 里已经接上这一步。
+
+判定 `@rpath/` 时是**按 dyld 的真实语义**来的：先按加载关系建图，
+再算每个镜像的 rpath 栈（主程序 ∪ 祖先链上各镜像 ∪ 自己），
+只有栈里确实有某条 `LC_RPATH` 能拼出实体文件才算通过。
+不用「候选目录碰运气」那种写法 —— 否则「文件恰好在对的目录里、
+但没有任何 rpath 指向它」会被误判成绿，而假绿正是这一步要消灭的东西。
 
 ---
 

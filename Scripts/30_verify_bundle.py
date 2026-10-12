@@ -21,6 +21,12 @@ App target 没声明 → 谁都没负责嵌入 → 装机后启动即退。）
 变成一条可执行的断言。顺带检查嵌套 framework 有没有 Info.plist
 （缺了它 zsign 读不到 CFBundleIdentifier，重签名会签出畸形 bundle）。
 
+判定 `@rpath/` 时**忠于 dyld 的语义**：先按加载关系建图，再算每个镜像的
+「rpath 栈」（主程序 ∪ 祖先链上各镜像 ∪ 自己），只有栈里真有某条 LC_RPATH
+能拼出实体文件才算通过。不用「候选目录碰运气」那种写法 ——
+否则「文件恰好在对的目录里、但没有任何 rpath 指向它」会被判成绿，
+而假绿正是这个脚本要消灭的东西。
+
 用法
 ----
     python3 Scripts/30_verify_bundle.py LCSignClone-unsigned.ipa
@@ -134,21 +140,27 @@ def is_system_path(value):
     return value.startswith(SYSTEM_PREFIXES)
 
 
-def resolve(value, macho_path, app_dir, executable_dir):
+def resolve(value, macho_path, executable_dir, rpath_pool):
     """把一个 LC_LOAD_DYLIB 的取值解析成包内的真实路径；解析不到返回 None。
 
     系统库直接算通过（返回一个哨兵字符串）。
+
+    这里刻意**忠于 dyld 的语义**而不是用候选目录猜：
+    `@rpath/` 只在调用方（及加载链）真的声明了对应 LC_RPATH 时才允许解析成功。
+    否则会出现「文件恰好在对的目录里、但没有任何 rpath 指向它」这种假绿 ——
+    而假绿正是这个脚本要消灭的东西。
     """
     if is_system_path(value):
         return "<系统库>"
 
     if value.startswith("@rpath/"):
         tail = value[len("@rpath/"):]
-        # dyld 会按各镜像的 LC_RPATH 依次尝试。这里覆盖本项目实际会出现的几种：
-        # 主程序与嵌套 framework 的 rpath 都指向 App 的 Frameworks 目录。
-        for candidate in (app_dir / "Frameworks" / tail,
-                          app_dir / tail,
-                          executable_dir / "Frameworks" / tail):
+        for raw in rpath_pool:
+            # rpath 自身也支持 @loader_path/@executable_path 前缀
+            base = expand_prefix(raw, macho_path, executable_dir)
+            if base is None:
+                continue
+            candidate = base / tail
             if candidate.exists():
                 return str(candidate)
         return None
@@ -163,6 +175,17 @@ def resolve(value, macho_path, app_dir, executable_dir):
 
     # 绝对路径但不在系统前缀里 —— 打包出去一定装不上
     return str(value) if Path(value).exists() else None
+
+
+def expand_prefix(raw, macho_path, executable_dir):
+    """把一条 LC_RPATH 展开成绝对目录；含未知前缀则返回 None。"""
+    if raw.startswith("@loader_path/"):
+        return macho_path.parent / raw[len("@loader_path/"):]
+    if raw.startswith("@executable_path/"):
+        return executable_dir / raw[len("@executable_path/"):]
+    if raw.startswith("@"):
+        return None  # 其他 @xxx 前缀本项目不会出现，宁可判红也不猜
+    return Path(raw)
 
 
 # ---- 校验一个 IPA ----------------------------------------------------------
@@ -244,21 +267,34 @@ def verify_app(app_dir):
     for path in machos:
         print("    · %s" % path.relative_to(app_dir))
 
+    info = {}
+    for path in machos:
+        deps, rpaths, _dylib_id = parse_macho(path)
+        info[path] = {"deps": deps, "rpaths": rpaths}
+
+    pools = build_rpath_pools(info, main_executable, app_dir, executable_dir)
+
     print()
     print("  动态依赖解析：")
 
     for path in machos:
-        deps, _rpaths, _dylib_id = parse_macho(path)
         relative = path.relative_to(app_dir)
+        pool = pools.get(path, [])
 
-        for kind, value in deps:
-            resolved = resolve(value, path, app_dir, executable_dir)
+        for kind, value in info[path]["deps"]:
+            resolved = resolve(value, path, executable_dir, pool)
 
             if resolved is None:
+                detail = ""
+                if value.startswith("@rpath/"):
+                    # 这种情况最常见，把「当时有哪些 rpath 可用」一并打出来，
+                    # 省掉排查时再手工解析一遍加载命令的功夫
+                    shown = "、".join(pool) if pool else "（无任何 LC_RPATH）"
+                    detail = "；该镜像可用的 LC_RPATH：%s" % shown
                 problems.append(
                     "%s 依赖 %s（%s），但包里找不到对应文件 —— "
-                    "装到设备上启动时会被 dyld 直接终止"
-                    % (relative, value, kind)
+                    "装到设备上启动时会被 dyld 直接终止%s"
+                    % (relative, value, kind, detail)
                 )
                 print("    ✗ %-28s %s" % (relative, value))
             else:
@@ -266,6 +302,90 @@ def verify_app(app_dir):
                 print("    ✓ %-28s %s%s" % (relative, value, suffix))
 
     return problems
+
+
+def build_rpath_pools(info, main_executable, app_dir, executable_dir):
+    """算出每个镜像解析 `@rpath/` 时可用的 rpath 列表，对齐 dyld 的语义。
+
+    dyld 的规则：加载某个 dylib 时，可用的 rpath 栈 = 主程序的 LC_RPATH
+    ∪ 该镜像**祖先链上每个镜像**的 LC_RPATH ∪ 它自己的 LC_RPATH。
+
+    这里分两步做：先用「全包 rpath 并集」这个**超集**把加载图画出来
+    （只为确定谁加载谁，不判对错），再按真实祖先链算每个镜像的池子。
+    直接用超集当池子会漏掉「文件在位但没人指向它」的假绿，
+    所以最终判定必须用收紧后的池子。
+    """
+    if main_executable is None:
+        return {path: [] for path in info}
+
+    all_rpaths = [r for item in info.values() for r in item["rpaths"]]
+
+    # --- 第一步：宽松解析，只为建图 ---
+    graph = {}
+    for path, item in info.items():
+        targets = []
+        for _kind, value in item["deps"]:
+            target = _permissive_resolve(value, path, app_dir, executable_dir, all_rpaths)
+            if target is not None:
+                targets.append(target)
+        graph[path] = targets
+
+    # --- 第二步：反向可达，得到每个镜像的祖先集合 ---
+    reverse = {path: [] for path in info}
+    for source, targets in graph.items():
+        for target in targets:
+            if target in reverse:
+                reverse[target].append(source)
+
+    main_rpaths = list(info.get(main_executable, {}).get("rpaths", []))
+
+    pools = {}
+    for path in info:
+        seen = {path}
+        queue = [path]
+        while queue:
+            node = queue.pop()
+            for parent in reverse.get(node, []):
+                if parent not in seen:
+                    seen.add(parent)
+                    queue.append(parent)
+
+        pool = list(main_rpaths)
+        for node in seen:
+            for raw in info.get(node, {}).get("rpaths", []):
+                if raw not in pool:
+                    pool.append(raw)
+        pools[path] = pool
+
+    return pools
+
+
+def _permissive_resolve(value, macho_path, app_dir, executable_dir, all_rpaths):
+    """只用于建图：宽松地把依赖映射到包内路径，允许借助任意 rpath。"""
+    if is_system_path(value):
+        return None  # 系统库不是包内节点
+
+    if value.startswith("@rpath/"):
+        tail = value[len("@rpath/"):]
+        for raw in all_rpaths:
+            base = expand_prefix(raw, macho_path, executable_dir)
+            if base is not None and (base / tail).exists():
+                return base / tail
+        for extra in (app_dir / "Frameworks", macho_path.parent):
+            if (extra / tail).exists():
+                return extra / tail
+        return None
+
+    if value.startswith("@loader_path/"):
+        candidate = macho_path.parent / value[len("@loader_path/"):]
+        return candidate if candidate.exists() else None
+
+    if value.startswith("@executable_path/"):
+        candidate = executable_dir / value[len("@executable_path/"):]
+        return candidate if candidate.exists() else None
+
+    candidate = Path(value)
+    return candidate if candidate.exists() else None
 
 
 def find_main_executable(app_dir, machos):

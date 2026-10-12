@@ -108,12 +108,25 @@ targets:
       #   Library not loaded: @rpath/OpenSSL.framework/OpenSSL
       #   Referenced from: .../LCSignCore.framework/LCSignCore
       #
-      # 声明在 application target 上，XcodeGen 的 embed 默认就是 true，
-      # 会生成 Embed Frameworks 阶段把它拷进去。Scripts/30_verify_bundle.py
-      # 会在 CI 里把这类漏嵌拦下来。
+      # 在 application target 上声明后，Xcode 会自己把 xcframework
+      # binaryTarget 嵌进 .app/Frameworks/（实测日志里源路径就是
+      # SourcePackages/checkouts/OpenSSL/Frameworks/OpenSSL.xcframework/
+      # ios-arm64/OpenSSL.framework）。
+      #
+      # ！！这里**不要**写 `embed: true` ！！
+      # XcodeGen 的 embed 条目生成的是 productRef 形式的构建文件
+      # （PBXBuildFile(product:) → productRef，见 XcodeProj 的
+      # PBXBuildFile.swift），放进 Embed Frameworks 阶段后 Xcode 会把产品名
+      # 当成字面路径去找 $(BUILT_PRODUCTS_DIR)/OpenSSL —— 而真实产物在
+      # PackageFrameworks/OpenSSL.framework，于是直接报：
+      #
+      #   error: .../Release-iphoneos/OpenSSL: No such file or directory
+      #
+      # 也就是说 embed: true 会与 Xcode 自己的嵌入**重复**，且它那条是坏的。
+      # 让 Xcode 自己处理即可；Scripts/30_verify_bundle.py 会在 CI 里
+      # 把「没嵌进去」这类问题拦下来。
       - package: OpenSSL
         product: OpenSSL
-        embed: true
     info:
       path: Sources/LCSignClone/Info.plist
       properties:
