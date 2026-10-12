@@ -321,9 +321,14 @@ final class ZipWriter {
     // MARK: - 压缩
 
     /// 把 `fileURL` 的内容用裸 DEFLATE 压出来，逐块交给 `sink`，返回 CRC32。
+    ///
+    /// `sink` 标成 `@escaping` 是刻意的：它会被嵌套函数 `pump` 捕获，
+    /// 而「嵌套函数捕获非 escaping 闭包参数」是编译器容易报
+    /// 「may allow it to escape」的场景。反正它只在本次调用内用，
+    /// 标成 escaping 没有任何代价。
     private static func streamCompress(fileURL: URL,
                                        uncompressedSize: Int64,
-                                       sink: (Data) throws -> Void,
+                                       sink: @escaping (Data) throws -> Void,
                                        onProgress: ((Int64, Int64) -> Void)?) throws -> UInt32 {
 
         guard let input = try? FileHandle(forReadingFrom: fileURL) else {

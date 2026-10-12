@@ -182,13 +182,13 @@ public enum IPAArchive {
 
         do {
             let total = totalBytes(of: payload)
-            var processed: Int64 = 0
+            let counter = ByteCounter()
 
             try addDirectory(payload,
                              relativePath: "Payload",
                              into: writer,
                              totalBytes: total,
-                             processedBytes: &processed,
+                             counter: counter,
                              onProgress: onProgress)
 
             try writer.finish()
@@ -200,6 +200,17 @@ public enum IPAArchive {
         }
     }
 
+    /// 已处理字节数的累加器。
+    ///
+    /// 用引用类型而不是 `inout Int64`：`addFile` 的 `onProgress` 是**可选**
+    /// 函数类型参数，而可选函数类型参数在 Swift 里默认是 escaping 的，
+    /// escaping 闭包捕获 `inout` 参数会直接编译报错
+    /// （`escaping closure captures 'inout' parameter`）。
+    /// 换成一个小盒子，闭包捕获的是对象引用，问题消失。
+    private final class ByteCounter {
+        var processed: Int64 = 0
+    }
+
     /// 递归把 `directory` 写进归档。
     ///
     /// 相对路径是**一路拼出来的**，不做任何绝对路径的前缀运算 ——
@@ -209,7 +220,7 @@ public enum IPAArchive {
                                      relativePath: String,
                                      into writer: ZipWriter,
                                      totalBytes: Int64,
-                                     processedBytes: inout Int64,
+                                     counter: ByteCounter,
                                      onProgress: ((Double) -> Void)?) throws {
         let fm = FileManager.default
 
@@ -234,16 +245,16 @@ public enum IPAArchive {
                                  relativePath: childRelativePath,
                                  into: writer,
                                  totalBytes: totalBytes,
-                                 processedBytes: &processedBytes,
+                                 counter: counter,
                                  onProgress: onProgress)
                 continue
             }
 
             try writer.addFile(childRelativePath, at: child) { processed, _ in
                 guard totalBytes > 0 else { return }
-                onProgress?(Double(processedBytes + processed) / Double(totalBytes))
+                onProgress?(Double(counter.processed + processed) / Double(totalBytes))
             }
-            processedBytes += fileSize(child)
+            counter.processed += fileSize(child)
         }
     }
 

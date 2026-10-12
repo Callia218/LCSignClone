@@ -220,7 +220,12 @@ struct DiagnosticsView: View {
             Button {
                 UIPasteboard.general.string = diagnosticReport()
                 withAnimation(.easeOut(duration: 0.2)) { didCopy = true }
-                DispatchQueue.main.asyncAfter(deadline: .now() + 2) {
+                // 用 Task 而不是 DispatchQueue.main.asyncAfter：
+                // 视图是 @MainActor 隔离的，Task 会继承这个上下文；
+                // DispatchQueue 的闭包是 @Sendable 的，捕获 self 在
+                // 严格并发检查下会报错。
+                Task {
+                    try? await Task.sleep(nanoseconds: 2_000_000_000)
                     withAnimation(.easeOut(duration: 0.2)) { didCopy = false }
                 }
             } label: {
