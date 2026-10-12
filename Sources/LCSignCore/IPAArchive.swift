@@ -109,7 +109,9 @@ public enum IPAArchive {
                 detail = "归档里没有任何条目被解出来 —— 要么归档是空的，"
                        + "要么所有条目都被路径安全校验拦掉了。"
             }
-            throw SigningError.noAppBundleInArchive(detail + listing(directory))
+            throw SigningError.noAppBundleInArchive(
+                detail + listing(directory: directory)
+            )
         }
 
         let entries = (try? fm.contentsOfDirectory(at: payload,

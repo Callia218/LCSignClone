@@ -179,9 +179,14 @@ struct DiagnosticsView: View {
 
             Card {
                 VStack(alignment: .leading, spacing: 0) {
-                    ForEach(Array(report.steps.enumerated()), id: \.element.id) { index, step in
-                        StepTimelineRow(step: step,
-                                        isLast: index == report.steps.count - 1)
+                    // 用下标而不是 `Array(steps.enumerated())` + 双参数闭包：
+                    // 后者依赖闭包对元组参数的解构，各版本编译器接受度不一致，
+                    // 而这里本来就不需要那个语法糖。
+                    ForEach(report.steps.indices, id: \.self) { index in
+                        StepTimelineRow(
+                            step: report.steps[index],
+                            isLast: index == report.steps.count - 1
+                        )
                     }
                 }
             }

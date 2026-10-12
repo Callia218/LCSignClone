@@ -56,7 +56,7 @@ struct HomeView: View {
         NavigationView {
             ScrollView {
                 VStack(spacing: Metric.Space.l) {
-                    StatusBoard(model: model, openDiagnostics: { activeSheet = .diagnostics })
+                    StatusBoard(model: model)
                     primaryAction
                     quickTiles
 
@@ -173,10 +173,16 @@ struct HomeView: View {
         }
     }
 
+    // 显式写全类型而不是 `.init(...)`：返回类型是 Optional，
+    // 隐式成员查找能不能穿过 Optional 各版本表现不一致。
     private var certificateBadge: QuickTile.Badge? {
-        if model.certificates.isEmpty { return .init(text: "空", tint: Brand.warning) }
-        if model.usableCertificates.isEmpty { return .init(text: "不可用", tint: Brand.danger) }
-        return .init(text: "可用", tint: Brand.success)
+        if model.certificates.isEmpty {
+            return QuickTile.Badge(text: "空", tint: Brand.warning)
+        }
+        if model.usableCertificates.isEmpty {
+            return QuickTile.Badge(text: "不可用", tint: Brand.danger)
+        }
+        return QuickTile.Badge(text: "可用", tint: Brand.success)
     }
 
     private var selfTestSubtitle: String {
@@ -186,9 +192,10 @@ struct HomeView: View {
 
     private var selfTestBadge: QuickTile.Badge? {
         guard let record = model.lastSelfTest else { return nil }
-        return record.isHealthy
-            ? .init(text: "通过", tint: Brand.success)
-            : .init(text: "\(record.failureCount) 项失败", tint: Brand.danger)
+        if record.isHealthy {
+            return QuickTile.Badge(text: "通过", tint: Brand.success)
+        }
+        return QuickTile.Badge(text: "\(record.failureCount) 项失败", tint: Brand.danger)
     }
 
     private var selfTestTint: Color {
@@ -287,7 +294,6 @@ struct HomeView: View {
 private struct StatusBoard: View {
 
     let model: AppModel
-    let openDiagnostics: () -> Void
 
     var body: some View {
         VStack(alignment: .leading, spacing: Metric.Space.l) {
@@ -298,13 +304,14 @@ private struct StatusBoard: View {
         .frame(maxWidth: .infinity, alignment: .leading)
         // 渐变与水印都放进 background，再统一 clipShape ——
         // 水印用了负偏移，挂在 overlay 上会溢出圆角。
-        .background(background)
+        // 名字不叫 background：那会和 View.background 修饰符撞名。
+        .background(backgroundLayer)
         .clipShape(RoundedRectangle(cornerRadius: Metric.Radius.hero,
                                     style: .continuous))
         .shadow(color: Brand.accentDeep.opacity(0.28), radius: 18, x: 0, y: 8)
     }
 
-    private var background: some View {
+    private var backgroundLayer: some View {
         ZStack(alignment: .topTrailing) {
             Brand.heroGradient
 

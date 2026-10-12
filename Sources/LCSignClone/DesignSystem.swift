@@ -1,5 +1,7 @@
 import LCSignCore
 import SwiftUI
+// 显式导入而不是靠传递：UIColor / 动态色构造都在这里用
+import UIKit
 
 // MARK: - 颜色令牌
 //
