@@ -2,11 +2,14 @@
 .build/
 Vendor/
 build/
+build-test/
 out/
 DerivedData/
 *.xcworkspace/
 *.xcodeproj/
 build.log
+test.log
+*.xcresult
 
 # 证书 —— 绝对不要提交
 *.p12

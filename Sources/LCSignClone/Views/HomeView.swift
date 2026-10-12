@@ -6,14 +6,29 @@ struct HomeView: View {
 
     @EnvironmentObject private var model: AppModel
 
-    @State private var showingSignSheet = false
-    @State private var showingCertificates = false
+    /// 三个弹窗共用一个状态。
+    ///
+    /// 不要写成三个并列的 `.sheet(isPresented:)` —— SwiftUI 对同一个视图上
+    /// 叠加多个 sheet 的处理并不一致，实测只有最后一个能稳定弹出来。
+    @State private var activeSheet: ActiveSheet?
+
+    private enum ActiveSheet: String, Identifiable {
+        case sign, certificates, diagnostics
+        var id: String { rawValue }
+    }
 
     var body: some View {
         navigationContent
             .navigationViewStyle(.stack)
             .task {
                 await model.refreshCertificates()
+            }
+            .sheet(item: $activeSheet) { sheet in
+                switch sheet {
+                case .sign:         SignSheet()
+                case .certificates: CertificateListView()
+                case .diagnostics:  DiagnosticsView()
+                }
             }
             .alert(
                 model.alert?.title ?? "",
@@ -46,12 +61,6 @@ struct HomeView: View {
             }
             .navigationTitle("LCSign")
             .toolbar { toolbarContent }
-            .sheet(isPresented: $showingSignSheet) {
-                SignSheet()
-            }
-            .sheet(isPresented: $showingCertificates) {
-                CertificateListView()
-            }
         }
     }
 
@@ -59,18 +68,25 @@ struct HomeView: View {
     private var toolbarContent: some ToolbarContent {
         ToolbarItem(placement: .navigationBarLeading) {
             Button {
-                showingCertificates = true
+                activeSheet = .certificates
             } label: {
                 Label("证书", systemImage: "key.fill")
             }
         }
         ToolbarItem(placement: .navigationBarTrailing) {
             Button {
-                showingSignSheet = true
+                activeSheet = .sign
             } label: {
                 Label("签名", systemImage: "plus.circle.fill")
             }
             .disabled(model.certificates.isEmpty)
+        }
+        ToolbarItem(placement: .navigationBarTrailing) {
+            Button {
+                activeSheet = .diagnostics
+            } label: {
+                Label("诊断", systemImage: "stethoscope")
+            }
         }
     }
 
@@ -95,12 +111,19 @@ struct HomeView: View {
 
             if model.certificates.isEmpty {
                 Button {
-                    showingCertificates = true
+                    activeSheet = .certificates
                 } label: {
                     Label("导入证书", systemImage: "key.fill")
                 }
                 .buttonStyle(.borderedProminent)
                 .padding(.top, 4)
+
+                Button {
+                    activeSheet = .diagnostics
+                } label: {
+                    Label("先跑一次引擎自检", systemImage: "stethoscope")
+                }
+                .buttonStyle(.bordered)
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)

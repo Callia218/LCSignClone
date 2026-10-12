@@ -60,6 +60,18 @@ typedef NS_ERROR_ENUM(ZSignErrorDomain, ZSignErrorCode) {
                 error:(NSError *_Nullable *_Nullable)error
     NS_SWIFT_NAME(signApp(atPath:p12Path:p12Password:provisionPath:entitlementsPath:bundleId:bundleVersion:displayName:iconFile:dylibPaths:));
 
+/// 对已解包的 .app 目录执行 **ad-hoc 签名**（不需要任何证书）。
+///
+/// ad-hoc 签名会完整走一遍「扫描 Mach-O → 生成 CodeDirectory → 写
+/// _CodeSignature/CodeResources」的流程，只是最后不写 CMS 签名块。
+/// 因此它非常适合做设备端自检：自检通过就说明签名引擎本身没问题，
+/// 后续真正签名再失败，原因一定出在证书或描述文件上。
+///
+/// @param appPath 已解包的 .app 目录路径
++ (BOOL)adHocSignAppAtPath:(NSString *)appPath
+                     error:(NSError *_Nullable *_Nullable)error
+    NS_SWIFT_NAME(adHocSignApp(atPath:));
+
 /// 读取 p12 的证书信息（CN / Team ID / 有效期）。
 ///
 /// 失败时返回 nil 并通过 `error` 说明原因（多半是密码不对）。

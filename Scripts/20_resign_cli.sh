@@ -128,7 +128,7 @@ download_zsign_release() {
   actual="$(shasum -a 256 "$dir/$asset" | awk '{print $1}')"
 
   if [[ -z "$expected" || "$expected" != "$actual" ]]; then
-    bad "SHA256 校验不通过（期望 ${expected:-空}，实际 $actual）"
+    bad "SHA256 校验不通过（期望 ${expected:-空}，实际 ${actual}）"
     return 1
   fi
 
@@ -232,9 +232,9 @@ else
   fi
 
   if [[ "$covered" == "yes" ]]; then
-    ok "App ID（$app_id）覆盖目标 Bundle ID（$target_bid）"
+    ok "App ID（${app_id}）覆盖目标 Bundle ID（${target_bid}）"
   else
-    bad "描述文件 App ID（$app_id）覆盖不了目标 Bundle ID（$target_bid）"
+    bad "描述文件 App ID（${app_id}）覆盖不了目标 Bundle ID（${target_bid}）"
     die "两个办法：加 --bundle-id 指定一个被覆盖的 ID；或在开发者后台为这个 Bundle ID 新建描述文件"
   fi
 fi

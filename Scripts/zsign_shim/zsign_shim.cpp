@@ -203,6 +203,83 @@ extern "C" int zsign_shim_sign_folder(const char *folder,
 }
 
 /* ==========================================================================
+ * ad-hoc 签名
+ *
+ * 依据（zhlynn/zsign src/openssl.cpp）：ZSignAsset::Init 在 bAdhoc 为真时，
+ * 除了可选地读一个 entitlements 文件之外**直接 return true** ——
+ * 不读证书、不读描述文件、不要求 TeamId。
+ * 签名侧（src/signing.cpp:SlotBuildCMSSignature）在 m_bAdhoc 为真时写入
+ * 固定 8 字节的 ldid 空签名槽 { 0xfa,0xde,0x0b,0x01,0x00,0x00,0x00,0x08 }。
+ * 所以整条链路不需要任何身份材料。
+ * ========================================================================== */
+
+extern "C" int zsign_shim_sign_adhoc(const char *folder, char **error_out)
+{
+    if (error_out != nullptr) { *error_out = nullptr; }
+
+    if (folder == nullptr || *folder == '\0') {
+        SetError(error_out, "缺少待签名的 .app 目录路径。");
+        return 0;
+    }
+
+    try {
+        ZSignAsset asset;
+        const bool inited = asset.Init(
+            std::string(),   // strCertFile
+            std::string(),   // strPKeyFile
+            std::string(),   // strProvFile
+            std::string(),   // strEntitleFile
+            std::string(),   // strPassword
+            true,            // bAdhoc：不校验身份
+            false,           // bSHA256Only
+            false            // bSingleBinary
+        );
+
+        if (!inited) {
+            // 上面已说明 bAdhoc 分支必定返回 true，走到这里说明 zsign 的行为
+            // 变了（比如换成了别的 fork），直接报出来比继续往下走好。
+            SetError(error_out,
+                     "ad-hoc 模式初始化失败。这通常意味着链接进来的 zsign 实现与预期不符。");
+            return 0;
+        }
+
+        const std::vector<std::string> dylibs;         // 自检不注入任何东西
+        const std::vector<std::string> remove_dylibs;
+
+        ZBundle bundle;
+        const bool ok = bundle.SignFolder(
+            &asset,
+            ToString(folder),
+            std::string(),   // bundle_id：不改写
+            std::string(),   // bundle_version：不改写
+            std::string(),   // display_name：不改写
+            dylibs,
+            remove_dylibs,
+            true,            // bForce：目录里可能已有旧签名，强制重写
+            false,           // bWeakInject
+            false,           // bEnableCache：不要往当前工作目录写缓存
+            false            // bRemoveProvision
+        );
+
+        if (!ok) {
+            SetError(error_out,
+                     "ad-hoc 签名失败。目标目录里可能没有合法的 Mach-O 可执行文件，"
+                     "或 Info.plist 缺少 CFBundleIdentifier / CFBundleExecutable。");
+            return 0;
+        }
+
+        return 1;
+
+    } catch (const std::exception &e) {
+        SetError(error_out, std::string("ad-hoc 签名过程抛出异常：") + e.what());
+        return 0;
+    } catch (...) {
+        SetError(error_out, "ad-hoc 签名过程抛出未知异常。");
+        return 0;
+    }
+}
+
+/* ==========================================================================
  * p12 解析
  *
  * iOS 上没有 SecCertificateCopyValues / kSecOIDX509V1Validity*，

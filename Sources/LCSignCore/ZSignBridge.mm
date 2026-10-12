@@ -128,6 +128,46 @@ static NSError *MakeError(ZSignErrorCode code, NSString *message, NSString *sugg
     return YES;
 }
 
++ (BOOL)adHocSignAppAtPath:(NSString *)appPath
+                     error:(NSError **)error
+{
+    NSFileManager *fm = NSFileManager.defaultManager;
+
+    if (appPath.length == 0 || ![fm fileExistsAtPath:appPath]) {
+        if (error) {
+            *error = MakeError(ZSignErrorFileNotFound,
+                               @"找不到待签名的 .app 目录。",
+                               appPath.length > 0
+                                   ? [NSString stringWithFormat:@"路径：%@", appPath]
+                                   : nil);
+        }
+        return NO;
+    }
+
+    char *errorMessage = NULL;
+    const int result = zsign_shim_sign_adhoc(appPath.UTF8String, &errorMessage);
+
+    if (result != 1) {
+        NSString *message = (errorMessage != NULL)
+            ? [NSString stringWithUTF8String:errorMessage]
+            : @"ad-hoc 签名失败，引擎未返回具体原因。";
+
+        if (errorMessage != NULL) {
+            zsign_shim_free(errorMessage);
+        }
+
+        if (error) {
+            *error = MakeError(ZSignErrorSignFailed,
+                               message ?: @"ad-hoc 签名失败",
+                               @"这条路径不依赖证书。失败通常说明目录里没有合法的 "
+                               @"Mach-O 可执行文件，或 Info.plist 缺少必需字段。");
+        }
+        return NO;
+    }
+
+    return YES;
+}
+
 + (nullable ZSignP12Info *)inspectP12AtPath:(NSString *)p12Path
                                    password:(NSString *)password
                                       error:(NSError **)error

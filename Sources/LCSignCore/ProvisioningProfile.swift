@@ -33,28 +33,36 @@ public struct ProvisioningProfile: @unchecked Sendable {
 
     public var deviceCount: Int { provisionedDevices.count }
 
-    /// 是否为通配符 App ID
+    /// 去掉 Team 前缀后的 App ID 模式。
+    ///
+    /// `application-identifier` 形如 `ABCDE12345.com.example.app`，
+    /// 真正描述覆盖范围的是第一个点之后的部分：`com.example.app`。
+    public var appIDPattern: String {
+        guard let dot = applicationIdentifier.firstIndex(of: ".") else {
+            return applicationIdentifier
+        }
+        return String(applicationIdentifier[applicationIdentifier.index(after: dot)...])
+    }
+
+    /// 是否为通配符 App ID（`TEAMID.*` 或 `TEAMID.com.example.*`）
     public var isWildcard: Bool {
-        applicationIdentifier.hasSuffix(".*") || applicationIdentifier.hasSuffix(".*")
+        let pattern = appIDPattern
+        return pattern == "*" || pattern.hasSuffix(".*")
     }
 
     // MARK: - 覆盖性校验
 
     /// 描述文件的 App ID 能否覆盖指定的 Bundle ID。
     ///
-    /// 三种情况：完全匹配、通配符前缀匹配、全局通配符。
+    /// 三种情况：全局通配符、前缀通配符、完全匹配。
     public func covers(bundleID: String) -> Bool {
-        let pattern: String
-        if let dot = applicationIdentifier.firstIndex(of: ".") {
-            pattern = String(applicationIdentifier[applicationIdentifier.index(after: dot)...])
-        } else {
-            pattern = applicationIdentifier
-        }
+        let pattern = appIDPattern
 
         if pattern == "*" { return true }
 
         if pattern.hasSuffix(".*") {
             let prefix = String(pattern.dropLast(2))
+            // `com.example.*` 既覆盖 com.example.app，也覆盖 com.example 本身
             return bundleID == prefix || bundleID.hasPrefix(prefix + ".")
         }
 
@@ -102,18 +110,61 @@ public struct ProvisioningProfile: @unchecked Sendable {
             return b.allSatisfy { item in a.contains { stringAllowed($0, item) } }
         }
         if let a = allowed as? [String: Any], let b = requested as? [String: Any] {
-            return b.allSatisfy { valueAllowed(a[$0.key] as Any, $0.value) }
+            // 显式判空：写成 a[pair.key] as Any 的话，缺键会变成
+            // Optional<Any>.none 再被 as? 逐个类型试探，最终靠"全都匹配不上"
+            // 兜到 false —— 结果虽然对，但没人看得出这是故意的。
+            return b.allSatisfy { pair in
+                guard let nested = a[pair.key] else { return false }
+                return valueAllowed(nested, pair.value)
+            }
         }
         return false
     }
 
-    /// 允许 `*` 结尾的通配前缀匹配
+    /// 带 `*` 的通配匹配，`*` 可以出现在任意位置、匹配任意长度子串。
+    ///
+    /// 只认尾部 `*` 是不够的 —— 描述文件里的真实写法至少有三类：
+    ///   `TEAMID.*`、`iCloud.com.example.*`（尾部）
+    ///   `applinks:*.example.com`（中间）
     private static func stringAllowed(_ allowed: String, _ requested: String) -> Bool {
         if allowed == requested { return true }
-        if allowed.hasSuffix("*") {
-            return requested.hasPrefix(String(allowed.dropLast()))
+
+        // `X.*` 也覆盖裸的 `X`。
+        //
+        // 严格按 glob 语义，`*` 匹配零个或多个字符，所以 `com.example.*` 只该
+        // 匹配 `com.example.` 开头的东西。但 Apple 对 App ID 的定义不是这样：
+        // `TEAMID.com.example.*` 是覆盖 `com.example` 本身的。entitlements 里的
+        // 通配写法沿用同一套规则，不然就会把合法请求判成越权。
+        if allowed.hasSuffix(".*"), requested == String(allowed.dropLast(2)) {
+            return true
         }
-        return false
+
+        guard allowed.contains("*") else { return false }
+
+        let parts = allowed
+            .split(separator: "*", omittingEmptySubsequences: false)
+            .map(String.init)
+
+        var remainder = Substring(requested)
+
+        for (index, part) in parts.enumerated() {
+            if part.isEmpty { continue }
+
+            if index == 0 {
+                // 首段必须落在开头
+                guard remainder.hasPrefix(part) else { return false }
+                remainder = remainder.dropFirst(part.count)
+            } else if index == parts.count - 1 {
+                // 末段必须落在结尾
+                guard remainder.hasSuffix(part) else { return false }
+                remainder = remainder.dropLast(part.count)
+            } else {
+                guard let range = remainder.range(of: part) else { return false }
+                remainder = remainder[range.upperBound...]
+            }
+        }
+
+        return true
     }
 
     // MARK: - 解析

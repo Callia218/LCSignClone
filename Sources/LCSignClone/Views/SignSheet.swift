@@ -138,7 +138,11 @@ struct SignSheet: View {
     // MARK: - 逻辑
 
     private var canSign: Bool {
-        selectedIPA != nil && selectedCertificate != nil
+        guard selectedIPA != nil, let certificate = selectedCertificate else { return false }
+        // 必须真的可用才算数：只有 p12 没有描述文件、或者两者 Team 对不上，
+        // 签出来的包一律装不上 —— 与其让 zsign 跑到一半再报个含糊的错，
+        // 不如在按钮这里就拦住。
+        return certificate.isUsable
     }
 
     private func warning(for cert: SigningCertificate) -> String {

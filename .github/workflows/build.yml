@@ -136,11 +136,49 @@ jobs:
           if-no-files-found: error
           retention-days: 30
 
+      # 放在上传产物之后：测试红了也要先把 IPA 留下来，
+      # 否则一次测试失败就把可用的包一起吞了。
+      - name: 运行单元测试
+        run: |
+          set -o pipefail
+
+          # 动态挑一个可用的 iPhone 模拟器。
+          # 写死机型名（比如 "iPhone 15"）在 runner 镜像更新后就会找不到设备，
+          # 属于典型的「昨天还好好的」故障。
+          DEVICE_ID="$(xcrun simctl list devices available --json | python3 -c '
+          import json, sys
+
+          devices = json.load(sys.stdin)["devices"]
+
+          # 运行时 key 形如 com.apple.CoreSimulator.SimRuntime.iOS-18-2，
+          # 倒序排一下就能先拿到最新那个 iOS
+          for runtime in sorted(devices, reverse=True):
+              if "iOS" not in runtime:
+                  continue
+              for device in devices[runtime]:
+                  if device.get("isAvailable") and "iPhone" in device["name"]:
+                      print(device["udid"])
+                      sys.exit(0)
+
+          sys.exit("找不到可用的 iPhone 模拟器")
+          ')"
+
+          echo "使用模拟器：$DEVICE_ID"
+
+          xcodebuild test \
+            -project LCSignClone.xcodeproj \
+            -scheme LCSignClone \
+            -destination "id=$DEVICE_ID" \
+            -derivedDataPath build-test \
+            2>&1 | tee test.log | tail -120
+
       - name: 构建日志（失败时）
         if: failure()
         uses: actions/upload-artifact@v4
         with:
           name: build-log
-          path: build.log
+          path: |
+            build.log
+            test.log
           if-no-files-found: ignore
           retention-days: 7

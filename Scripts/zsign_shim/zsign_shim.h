@@ -54,6 +54,25 @@ int zsign_shim_sign_folder(const char *folder,
                            int dylib_count,
                            char **error_out);
 
+/*
+ * 对已解包的 .app 目录执行 **ad-hoc 签名**。
+ *
+ * ad-hoc 签名不校验任何身份，只在签名槽里写入标准的空 CMS 块
+ * （ldid 那一串 0xfade0b01），因此**既不需要 p12，也不需要描述文件**。
+ * 签出来的包在 iOS 上装不了（没有身份），但「扫描 Mach-O → 生成
+ * CodeDirectory → 写 _CodeSignature/CodeResources」这条链路是完整跑过的。
+ *
+ * 存在的意义是把失败原因切开：签名失败无非两类原因 —— 引擎本身跑不起来，
+ * 或者证书/描述文件有问题。ad-hoc 自检通过即证明引擎没问题，
+ * 之后真正的签名再失败，就一定出在证书侧。
+ *
+ * folder      .app 目录路径（不是 IPA）
+ * error_out   失败时写入错误信息（需用 zsign_shim_free 释放），可为 NULL
+ *
+ * 返回 1 表示成功，0 表示失败。
+ */
+int zsign_shim_sign_adhoc(const char *folder, char **error_out);
+
 /* ==========================================================================
  * p12 解析
  *

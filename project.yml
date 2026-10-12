@@ -71,8 +71,11 @@ targets:
           - "$(SRCROOT)/Vendor/zsign/include"
           - "$(SRCROOT)/Scripts/zsign_shim"
           - "$(SRCROOT)/Sources/LCSignCore/include"
+        # 10_build_zsign.sh 按平台分别产出静态库，这里用 $(PLATFORM_NAME)
+        # 取对应那一份（真机 iphoneos / 模拟器 iphonesimulator）。
+        # 不分开的话模拟器链接会因为「device-only 目标文件」直接失败。
         LIBRARY_SEARCH_PATHS:
-          - "$(SRCROOT)/Vendor/zsign/lib"
+          - "$(SRCROOT)/Vendor/zsign/lib/$(PLATFORM_NAME)"
         # OpenSSL 由 SwiftPM 提供；这里链接 zsign 静态库、C++ 运行时与压缩库
         OTHER_LDFLAGS:
           - "-lzsign"
@@ -129,3 +132,48 @@ targets:
         PRODUCT_BUNDLE_IDENTIFIER: com.example.lcsignclone
         PRODUCT_NAME: LCSignClone
         TARGETED_DEVICE_FAMILY: "1,2"
+
+  # ---------------------------------------------------------------
+  # 测试：只测 LCSignCore 的纯逻辑与签名链路
+  #
+  # 刻意**不挂宿主 App**（不设 TEST_HOST）。挂了宿主就得先起一遍 SwiftUI，
+  # 跑得慢还容易因为界面问题连坐；而这里要验证的东西（描述文件解析、
+  # entitlements 比对、IPA 往返、签名引擎）全都不需要界面。
+  # 代价是 LCSignCore.framework 得嵌进测试 bundle 里，靠 LD_RUNPATH 找到。
+  # ---------------------------------------------------------------
+  LCSignCoreTests:
+    type: bundle.unit-test
+    platform: iOS
+    sources:
+      - path: Tests/LCSignCoreTests
+    dependencies:
+      - target: LCSignCore
+        embed: true
+        link: true
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.example.lcsigncore.tests
+        PRODUCT_NAME: LCSignCoreTests
+        GENERATE_INFOPLIST_FILE: YES
+        DEFINES_MODULE: YES
+        SWIFT_VERSION: "5.9"
+        LD_RUNPATH_SEARCH_PATHS:
+          - "$(inherited)"
+          - "@executable_path/Frameworks"
+          - "@loader_path/Frameworks"
+
+# ---------------------------------------------------------------
+# 显式声明 scheme，别依赖 XcodeGen 的自动生成 ——
+# CI 里用 `xcodebuild -scheme LCSignClone`，scheme 不在磁盘上就直接失败。
+# ---------------------------------------------------------------
+schemes:
+  LCSignClone:
+    build:
+      targets:
+        LCSignClone: all
+    run:
+      config: Debug
+    test:
+      config: Debug
+      targets:
+        - name: LCSignCoreTests

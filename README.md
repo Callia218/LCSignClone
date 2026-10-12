@@ -20,12 +20,17 @@ git push -u origin main
 
 推到 GitHub 后，Actions 会自动跑 `Build IPA` 流程：
 
-1. 在 macOS runner 上编译 zsign 静态库
+1. 在 macOS runner 上编译 zsign 静态库（真机 + 模拟器两个切片）
 2. 生成 Xcode 工程并编译 App
 3. 产出 **未签名 IPA**（`LCSignClone-unsigned.ipa`）
 4. 如果你配了证书密钥，同时产出 **已签名 IPA**（`LCSignClone-signed.ipa`）
+5. 在模拟器上跑单元测试（描述文件解析、entitlements 比对、IPA 往返、
+   以及一次真实的 ad-hoc 签名）
 
 在 Actions 页面 → 对应那次运行 → 底部 **Artifacts** 下载即可。
+
+> 第 5 步排在产物上传之后，是刻意的：测试红了也要先把 IPA 留下来，
+> 不然一次测试失败会把能用的包一起吞掉。所以看到红叉先看是哪一步红的。
 
 ### 想让 CI 直接帮你签好
 
@@ -127,6 +132,27 @@ mobileprovision    = Apple 签发的授权文件    →  说明「你能装什�
 > 4. entitlements 是否超出授权（对比描述文件里的 `Entitlements` 段）
 > 5. 设备 UDID 是否在描述文件白名单里
 
+### 本地开发循环
+
+```bash
+./Scripts/10_build_zsign.sh     # 先编静态库，否则下面链接不到 -lzsign
+xcodegen generate               # 生成 .xcodeproj
+
+# 跑测试（模拟器）。这一步会真跑一次 ad-hoc 签名，不用证书
+xcodebuild test \
+    -project LCSignClone.xcodeproj \
+    -scheme LCSignClone \
+    -destination 'platform=iOS Simulator,name=iPhone 15'
+
+# 装到模拟器上点着看
+xcodebuild -project LCSignClone.xcodeproj -scheme LCSignClone \
+    -destination 'platform=iOS Simulator,name=iPhone 15' build
+```
+
+`10_build_zsign.sh` 默认同时编真机（arm64）和模拟器（arm64 + x86_64）
+两个切片，因为单元测试要跑在模拟器上。只想出真机包时传
+`PLATFORMS=iphoneos` 能省掉一半编译时间。
+
 ---
 
 ## 3. 阶段 1：最小可用 App
@@ -140,6 +166,30 @@ mobileprovision    = Apple 签发的授权文件    →  说明「你能装什�
 **明确不做**（留到后续阶段）：越狱注入、本地 HTTP/WebDAV 服务、
 plist 树形编辑器、软件源解析、备份格式、插件系统、灵动岛、自更新。
 
+### 装到设备后，先点一次「诊断」
+
+第一次用真机跑这个 App，别急着导证书 —— 先点右上角的**诊断**，
+跑一次引擎自检。
+
+自检**不需要任何证书**，它会临时构造一个 .app（可执行文件用的是
+`LCSignCore.framework` 自己那段真实的 Mach-O），完整跑一遍
+「打包 → 解包 → ad-hoc 签名 → 校验 `_CodeSignature/CodeResources`」。
+
+它的价值在于把失败原因切开：
+
+| 自检结果 | 说明 |
+|---|---|
+| 通过 | 引擎没问题。之后真签名再失败，**一定**是证书 / 描述文件的问题 |
+| 不通过 | 引擎侧的问题（静态库没链上、架构不对、沙盒写不了临时目录…），跟证书无关 |
+
+没有这一步的话，两类原因会混成同一句「签名失败」，排查方向全靠猜。
+
+> ad-hoc 签名在 zsign 里是「不校验身份、只写一个固定的空 CMS 槽」的模式，
+> 所以签出来的包装不了 —— 它只用来证明引擎活着，不是可用的产物。
+
+同一段代码在 CI 里也有对应的测试用例（`EngineSelfTestTests`），
+跑在模拟器上。模拟器过不了，真机上也好不了。
+
 ---
 
 ## 4. 目录结构
@@ -149,29 +199,46 @@ LCSignClone/
 ├── project.yml                       XcodeGen 工程定义
 ├── Scripts/
 │   ├── 00_check_env.sh               环境检查
-│   ├── 10_build_zsign.sh             编译 zsign → XCFramework
-│   └── 20_resign_cli.sh              阶段 0：命令行重签
+│   ├── 10_build_zsign.sh             编译 zsign 静态库（真机 + 模拟器）
+│   ├── 20_resign_cli.sh              阶段 0：命令行重签
+│   └── zsign_shim/                   zsign C++ 引擎的纯 C 门面（唯一来源）
+│       ├── zsign_shim.h
+│       └── zsign_shim.cpp
+├── Tests/
+│   └── LCSignCoreTests/              单元测试（跑在模拟器上）
+│       ├── TestSupport.swift         造描述文件 / 临时目录 / .app 的工具
+│       ├── ProvisioningProfileTests.swift
+│       ├── SigningCertificateTests.swift
+│       ├── IPAArchiveTests.swift     含 zip slip 防护
+│       └── EngineSelfTestTests.swift 真跑一遍 ad-hoc 签名
 └── Sources/
     ├── LCSignClone/                  UI 层（iOS App target）
     │   ├── LCSignCloneApp.swift
     │   ├── Info.plist
+    │   ├── AppModel.swift            界面状态与签名任务编排
     │   └── Views/
     │       ├── HomeView.swift        主界面：任务列表
     │       ├── SignSheet.swift       签名表单
-    │       └── CertificateRow.swift  证书展示
+    │       ├── CertificateRow.swift  证书展示 / 证书库 / 导入
+    │       └── DiagnosticsView.swift 诊断页：跑引擎自检 + 环境信息
     └── LCSignCore/                   核心层（framework target）
         ├── SigningRequest.swift      签名参数模型
         ├── SigningService.swift      签名编排（核心）
         ├── SigningError.swift        错误定义
         ├── CertificateStore.swift    证书库 + 钥匙串
         ├── SigningCertificate.swift  证书模型（含有效期）
-        ├── ProvisioningProfile.swift 描述文件解析
+        ├── ProvisioningProfile.swift 描述文件解析 + 授权比对
         ├── IPAArchive.swift          IPA 解包/打包
+        ├── EngineSelfTest.swift      不依赖证书的引擎自检
         ├── include/
         │   ├── LCSignCore.h          伞形头文件（umbrella header）
         │   └── ZSignBridge.h         Objective-C++ 桥接接口
         └── ZSignBridge.mm            桥接 zsign C++ API
 ```
+
+> `Scripts/zsign_shim/` 是 shim 的**唯一来源**：`10_build_zsign.sh` 编译它，
+> 并把它拷到 `Vendor/zsign/include/` 供 Xcode 侧的桥接层 include。
+> 所以 `Vendor/` 整个目录都在 `.gitignore` 里，不要往里放源码。
 
 > **为什么是伞形头文件而不是桥接头**：framework target 不支持桥接头
 > （Xcode 直接报 `using bridging headers with framework targets is unsupported`）。
