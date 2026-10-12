@@ -181,7 +181,7 @@ plist 树形编辑器、软件源解析、备份格式、插件系统、灵动�
 
 自检**不需要任何证书**，它会临时构造一个 .app（可执行文件用的是
 `LCSignCore.framework` 自己那段真实的 Mach-O），完整跑一遍
-「打包 → 解包 → ad-hoc 签名 → 校验 `_CodeSignature/CodeResources`」。
+「打包 → 解包 → **校验往返内容** → ad-hoc 签名 → 校验 `_CodeSignature/CodeResources`」。
 
 它的价值在于把失败原因切开：
 
@@ -195,8 +195,52 @@ plist 树形编辑器、软件源解析、备份格式、插件系统、灵动�
 > ad-hoc 签名在 zsign 里是「不校验身份、只写一个固定的空 CMS 槽」的模式，
 > 所以签出来的包装不了 —— 它只用来证明引擎活着，不是可用的产物。
 
+「解包」这一步不只是确认文件在不在，还会比对**往返后的实际内容**：
+
+- 资源文件 `Resource.txt` 的文本内容必须与写入时逐字节相同
+- 可执行文件的大小必须与源文件一致
+
+这两条是专门为打包器加的。压缩/解压只要有一点偏差（写错长度、CRC 不对、
+流式压缩没收尾），它们就能当场抓到，而不是等装到设备上才发现。
+
 同一段代码在 CI 里也有对应的测试用例（`EngineSelfTestTests`），
 跑在模拟器上。模拟器过不了，真机上也好不了。
+
+> **注意**：自检用的是「合成 .app 的 ad-hoc 签名」，它**不可能**发现
+> 「OpenSSL 动态框架没被嵌进 App 包」这类问题 —— 那属于包结构问题，
+> 不是引擎问题。两者是正交的，包结构由 `Scripts/30_verify_bundle.py`
+> 在 CI 里静态校验（见 6.6）。
+
+---
+
+## 3.1 界面
+
+界面全部走 `DesignSystem.swift` 里的令牌，不直接写字面色值和间距：
+
+| 令牌 | 内容 |
+|---|---|
+| `Brand` | 主色 / 语义色（成功 / 警告 / 危险）/ 表面色 / 主视觉渐变 |
+| `Metric` | 间距阶梯（4 / 8 / 12 / 16 / 24 / 32）、圆角、页面留白 |
+| `Typo` | 字号层级；标识符（Team ID、Bundle ID、路径）统一等宽 |
+
+通用组件：`Card`（圆角 + 细边框 + 浅投影）、`IconBadge`、`StatusPill`、
+`Meter`、`NoticeBar`、`EmptyState`、`InfoRow`、`PrimaryActionStyle`、
+`GhostActionStyle`。
+
+三个界面：
+
+- **首页** —— 顶部状态板（证书数 / 记录数 / 引擎健康度）+ 主操作按钮 +
+  快捷方块 + 当前证书 + 签名记录卡片流。签名记录卡上直接给出产物大小、
+  用时、压缩比和导出按钮；失败的任务卡内联显示错误原因并给「重试」。
+- **重签名页** —— 「选包 → 选证书 → 执行」三段式，可选改写（Bundle ID /
+  显示名称）折叠起来。证书不可用时把原因直接写在选项上，而不是让按钮
+  默默点不动。
+- **诊断页** —— 健康横幅 + 自检时间线 + 运行环境 + **一键复制诊断报告**。
+  报告是纯文本（环境 + 每一步的结果与细节），反馈问题时贴出来即可。
+
+> 复制报告这个功能是补课补出来的：之前排查一次真机崩溃，来回好几轮都在
+> 靠用户口述界面上的文字。把页面上的信息一次性变成可粘贴的文本，
+> 比任何措辞上的优化都省事。
 
 ---
 
@@ -219,17 +263,19 @@ LCSignClone/
 │       ├── ProvisioningProfileTests.swift
 │       ├── SigningCertificateTests.swift
 │       ├── IPAArchiveTests.swift     含 zip slip 防护
+│       ├── ZipWriterTests.swift      打包往返：多块文件 / 空文件 / 中文名 / 进度
 │       └── EngineSelfTestTests.swift 真跑一遍 ad-hoc 签名
 └── Sources/
     ├── LCSignClone/                  UI 层（iOS App target）
     │   ├── LCSignCloneApp.swift
     │   ├── Info.plist
+    │   ├── DesignSystem.swift        设计令牌（颜色/间距/字号）+ 通用组件
     │   ├── AppModel.swift            界面状态与签名任务编排
     │   └── Views/
-    │       ├── HomeView.swift        主界面：任务列表
-    │       ├── SignSheet.swift       签名表单
-    │       ├── CertificateRow.swift  证书展示 / 证书库 / 导入
-    │       └── DiagnosticsView.swift 诊断页：跑引擎自检 + 环境信息
+    │       ├── HomeView.swift        首页：状态板 + 主操作 + 签名记录
+    │       ├── SignSheet.swift       重签名页
+    │       ├── CertificateRow.swift  证书行 / 证书库 / 导入证书
+    │       └── DiagnosticsView.swift 诊断页：引擎自检 + 环境 + 复制报告
     └── LCSignCore/                   核心层（framework target）
         ├── SigningRequest.swift      签名参数模型
         ├── SigningService.swift      签名编排（核心）
@@ -238,6 +284,7 @@ LCSignClone/
         ├── SigningCertificate.swift  证书模型（含有效期）
         ├── ProvisioningProfile.swift 描述文件解析 + 授权比对
         ├── IPAArchive.swift          IPA 解包/打包
+        ├── ZipWriter.swift           手写的 O(n) ZIP 写入器（打包用）
         ├── EngineSelfTest.swift      不依赖证书的引擎自检
         ├── include/
         │   ├── LCSignCore.h          伞形头文件（umbrella header）
@@ -375,6 +422,93 @@ python3 Scripts/30_verify_bundle.py 你的包.ipa
 只有栈里确实有某条 `LC_RPATH` 能拼出实体文件才算通过。
 不用「候选目录碰运气」那种写法 —— 否则「文件恰好在对的目录里、
 但没有任何 rpath 指向它」会被误判成绿，而假绿正是这一步要消灭的东西。
+
+### 6.7 打包是 O(n²) 的（ZIPFoundation 的 addEntry）
+
+ZIPFoundation 的 `Archive.addEntry` 每写一个条目，都会**先把已有的中央目录
+整段读出来、再连同新条目一起写回去**：
+
+```
+Archive+Writing.swift:124–155
+  fseeko(offsetToStartOfCentralDirectory)
+  readChunk(of: existingSize)        // 读出全部已有中央目录
+  ... 写新条目 ...
+  writeLargeChunk(existingData, ...) // 整段回写
+```
+
+于是写 n 个条目就是 O(n²) 的 I/O。中央目录条目约 100 字节，
+一个 5000 文件的 `.app` 累计要写约 **1.25 GB** —— 而重签名工具的主战场
+恰恰是大包。
+
+**修法**：自己写一个 O(n) 的写入器 `Sources/LCSignCore/ZipWriter.swift`，
+顺序写「本地文件头 + 压缩数据」，中央目录条目先攒在内存里最后一次性写出。
+内存开销与文件数成正比（每条约 100 字节），与文件大小无关。
+
+实现上几个要点：
+
+- **压缩**用 Compression 框架的流式 API。`COMPRESSION_ZLIB` 产出的是
+  **裸 DEFLATE**（不带 zlib 头、不带 Adler-32），正是 ZIP method 8 要的东西。
+  不能用 `compression_encode_buffer` —— 它要求整个输入在内存里，
+  而 `.app` 里的可执行文件动辄几百 MB。
+- **CRC 与压缩后长度**要等数据写完才知道，所以本地文件头先写占位值，
+  数据写完再 `seek` 回去补写。这样就不必启用 data descriptor
+  （通用位标记 bit 3）—— 不少解包工具对它的支持并不完整。
+- **目录条目必须显式写进归档**，否则空目录解包后会消失。外部属性高 16 位
+  要写 POSIX 的 `S_IFDIR`/`S_IFREG`，`versionMadeBy` 高字节写 3（Unix），
+  解包方才会按类型位判定。
+- **ZIP64** 是否启用必须在写本地头**之前**决定（补写时长度不能变），
+  而两个判据（文件未压缩大小、当前偏移）在写之前都是已知的。
+  按 APPNOTE 4.4.1.1，只有三种情况才必须写 ZIP64 结束记录：
+  条目数 ≥ 0xFFFF、中央目录偏移 ≥ 0xFFFFFFFF、中央目录长度 ≥ 0xFFFFFFFF。
+
+打包路径的往返一致性由 `ZipWriterTests` 钉死：多块文件（跨 256 KB 读块边界）、
+0 字节文件（走「喂空输入 + FINALIZE」收尾）、中文/emoji 文件名、
+空目录存活、进度单调且收敛到 1.0。读取侧用的是 ZIPFoundation 的 `Archive`
+—— 与写入侧是两套完全独立的实现，所以「能读回来且内容一致」本身就是交叉验证。
+
+### 6.8 `standardizedFileURL` 会解析符号链接，但只在路径已存在时
+
+这条让「解包 IPA」在**真机上必挂、模拟器上永远绿**。
+
+原实现是拿绝对路径比前缀来判断「这个条目有没有逃出目标目录」：
+
+```swift
+let base = directory.standardizedFileURL.path
+let target = directory.appendingPathComponent(entry.path).standardizedFileURL.path
+guard target.hasPrefix(base) else { continue }   // 认为这是路径逃逸
+```
+
+问题在于 `standardizedFileURL` 的语义**取决于路径存不存在**：
+
+- 对**已存在**的路径，它会解析符号链接
+- 对**尚未创建**的路径，它只做词法归一化，不动符号链接
+
+iOS 的临时目录在 `/var/...`，而 `/var` 是指向 `/private/var` 的符号链接。
+于是：
+
+| 对象 | 是否已存在 | 标准化结果 |
+|---|---|---|
+| 基准目录 `directory` | 是（我们刚创建） | `/private/var/...` |
+| 条目目标 `directory/Payload/...` | 否（还没解出来） | `/var/...` |
+
+前缀比对**全部失败**，所有条目都被当成「路径逃逸」跳过，
+最后以「IPA 里没有 Payload/*.app 目录」这种极具误导性的方式报错。
+模拟器上临时目录在 `/Users` 下，没有这层链接，所以 CI 一直是绿的。
+
+**修法**：改成纯词法归一化 `sanitizedRelativePath(_:)` —— 只看路径本身，
+与它存不存在无关；相对路径一路拼出来，**不做任何绝对路径的前缀运算**。
+同时把「三类失败」分别报错并附上目录的实际内容：
+
+```
+IPA 里没有可用的 Payload/*.app。Payload 里没有 .app。 实际内容：README.txt、notes/。
+```
+
+排查时这句「实际内容」往往就是全部线索。
+
+> 顺带把解包改成用 `archive.extract(entry, consumer:)` 自己落盘，
+> 绕开 `extract(_:to:)` 里的 `transferAttributes` —— 那个会把归档里记的
+> `posixPermissions` 原样盖到文件上，那一位若是 0，落盘的文件就变成不可读，
+> 后续 inspect 又会以「没有 Payload」这种误导性的方式失败。
 
 ---
 

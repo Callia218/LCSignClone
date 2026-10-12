@@ -10,7 +10,11 @@ public enum SigningError: LocalizedError, Equatable {
     case inputNotFound(URL)
     case p12Unreadable(String)
     case profileUnreadable(String)
-    case noAppBundleInArchive
+    /// 归档打不开（不是合法 zip / 文件被截断 / 权限问题）
+    case archiveUnreadable(String)
+    /// 归档能打开，但里面找不到可用的 .app。关联值是诊断细节
+    /// （例如「Payload 里实际有什么」），排查时比一句「不是有效归档」有用得多。
+    case noAppBundleInArchive(String)
     case executableMissing(String)
 
     // 证书与描述文件不匹配
@@ -36,8 +40,11 @@ public enum SigningError: LocalizedError, Equatable {
         case .profileUnreadable(let reason):
             return "描述文件无法读取：\(reason)"
 
-        case .noAppBundleInArchive:
-            return "IPA 里没有 Payload/*.app 目录，可能不是有效的应用归档。"
+        case .archiveUnreadable(let reason):
+            return "打不开这个 IPA 归档：\(reason)"
+
+        case .noAppBundleInArchive(let detail):
+            return "IPA 里没有可用的 Payload/*.app。\(detail)"
 
         case .executableMissing(let name):
             return "App 目录里找不到可执行文件 \(name)，包可能已损坏。"
@@ -83,8 +90,13 @@ public enum SigningError: LocalizedError, Equatable {
             return "确认选的是 .mobileprovision 描述文件，而不是 .p12 证书。\n"
                  + "可用命令查看内容：security cms -D -i profile.mobileprovision"
 
+        case .archiveUnreadable:
+            return "确认文件没有被截断，且确实是一个 zip 归档。"
+                 + "可以先用命令检查：unzip -l 你的文件.ipa"
+
         case .noAppBundleInArchive:
-            return "换一个来源可靠的 IPA 重试。"
+            return "换一个来源可靠的 IPA 重试。若这是本机刚签出来的产物，"
+                 + "请把上面这段实际内容一并反馈，那是定位问题的关键线索。"
 
         case .executableMissing:
             return "重新下载原始 IPA，当前文件可能不完整。"

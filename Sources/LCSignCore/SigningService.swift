@@ -135,7 +135,13 @@ public actor SigningService {
 
         // ---- 6. 打包 ----
         report(onProgress, .packaging, 0.85, "重新打包")
-        try IPAArchive.package(appBundle: contents.appBundle, to: request.outputIPA)
+        try IPAArchive.package(appBundle: contents.appBundle,
+                               to: request.outputIPA) { fraction in
+            // 打包这一段映射到总进度的 0.85 → 0.97
+            onProgress(Progress(stage: .packaging,
+                                fraction: 0.85 + fraction * 0.12,
+                                detail: "重新打包 \(Int(fraction * 100))%"))
+        }
 
         // ---- 7. 校验产物 ----
         try verifyOutput(request.outputIPA)

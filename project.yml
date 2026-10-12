@@ -134,7 +134,10 @@ targets:
         CFBundleName: LCSignClone
         CFBundleShortVersionString: "1.0"
         # 每次出可安装的包都往上加 1，方便在设备上和崩溃日志里区分版本
-        CFBundleVersion: "2"
+        # 1 = 首个可安装包
+        # 2 = 修掉 OpenSSL 动态框架没嵌进包导致的启动闪退
+        # 3 = 界面重做 + 打包改成 O(n) + 修掉真机自检「解包 IPA」误报
+        CFBundleVersion: "3"
         UILaunchScreen: {}
         UIRequiredDeviceCapabilities:
           - arm64

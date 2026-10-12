@@ -185,9 +185,38 @@ public enum EngineSelfTest {
                 return finish()
             }
 
-            steps.append(Step(title: "解包 IPA",
-                              detail: "\(contents.bundleID) · 可执行文件 \(contents.executableName)",
-                              outcome: .passed))
+            // 内容一致性校验。压缩/解压只要有偏差（写错了长度、CRC 不对、
+            // 流式压缩没收尾…），这两条就能直接抓到 —— 比只确认「文件存在」
+            // 有意义得多。
+            let resource = contents.appBundle.appendingPathComponent("Resource.txt")
+            let expected = "LCSign self-test resource\n"
+            guard let text = try? String(contentsOf: resource, encoding: .utf8),
+                  text == expected else {
+                steps.append(Step(title: "解包 IPA",
+                                  detail: "资源文件内容与写入时不一致",
+                                  outcome: .failed("往返后资源文件内容变了，压缩或解压有偏差。")))
+                return finish()
+            }
+
+            let unpackedExecutable = contents.appBundle
+                .appendingPathComponent(contents.executableName)
+            let originalSize = fileSize(engineBinary)
+            let unpackedSize = fileSize(unpackedExecutable)
+            guard unpackedSize == originalSize else {
+                steps.append(Step(
+                    title: "解包 IPA",
+                    detail: "可执行文件 \(originalSize) → \(unpackedSize) 字节",
+                    outcome: .failed("往返后可执行文件大小变了，压缩数据被截断或损坏。")
+                ))
+                return finish()
+            }
+
+            steps.append(Step(
+                title: "解包 IPA",
+                detail: "\(contents.bundleID) · 可执行文件 \(contents.executableName)"
+                      + "（\(unpackedSize) 字节，与源文件一致）",
+                outcome: .passed
+            ))
         } catch {
             steps.append(Step(title: "解包 IPA",
                               detail: error.localizedDescription,

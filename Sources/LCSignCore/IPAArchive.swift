@@ -3,7 +3,10 @@ import ZIPFoundation
 
 /// IPA 的解包与打包。
 ///
-/// 注意用流式方式逐条处理，不要 `Data(contentsOf:)` 整个读进来 ——
+/// 解包仍用 ZIPFoundation（它的读取路径没问题），打包改用自己的
+/// ``ZipWriter`` —— 原因见那个类型的注释（ZIPFoundation 的写入是 O(n²)）。
+///
+/// 两条路径都注意用流式方式逐条处理，不要 `Data(contentsOf:)` 整个读进来 ——
 /// 一个解包后几百 MB 的 IPA 会直接把内存打爆。
 public enum IPAArchive {
 
@@ -26,59 +29,111 @@ public enum IPAArchive {
         try fm.createDirectory(at: directory, withIntermediateDirectories: true)
 
         guard let archive = try? Archive(url: ipa, accessMode: .read, pathEncoding: nil) else {
-            throw SigningError.noAppBundleInArchive
+            throw SigningError.archiveUnreadable(
+                "\(ipa.lastPathComponent) 不是合法的 zip，或文件已被截断。"
+            )
         }
 
-        let basePath = directory.standardizedFileURL.path
+        var extractedFiles = 0
 
         for entry in archive {
-            let destination = directory.appendingPathComponent(entry.path).standardizedFileURL
+            // 目录判定同时看 entry.type 和路径后缀：ZIP 规范里「以 / 结尾」
+            // 就是目录，两个条件取或比只信其中一个稳。
+            let isDirectory = entry.type == .directory || entry.path.hasSuffix("/")
 
-            // 防 zip slip：条目路径不能逃出目标目录
-            guard destination.path == basePath
-                    || destination.path.hasPrefix(basePath + "/") else {
+            guard let relative = sanitizedRelativePath(entry.path), !relative.isEmpty else {
+                // 会逃出目标目录的条目，直接丢掉
                 continue
             }
 
-            switch entry.type {
-            case .directory:
+            let destination = directory.appendingRelativePath(relative)
+
+            if isDirectory {
                 try fm.createDirectory(at: destination, withIntermediateDirectories: true)
+                continue
+            }
 
-            case .file:
-                try fm.createDirectory(at: destination.deletingLastPathComponent(),
-                                       withIntermediateDirectories: true)
-                _ = try archive.extract(entry, to: destination)
-
-            case .symlink:
-                // 正常的 IPA 里不该出现符号链接。出现了就跳过 ——
+            if entry.type == .symlink {
+                // 正常 IPA 里不该出现符号链接。出现了就跳过 ——
                 // 链接目标可能指向容器外，是典型的路径逃逸手法。
                 continue
-
-            @unknown default:
-                continue
             }
+
+            try fm.createDirectory(at: destination.deletingLastPathComponent(),
+                                   withIntermediateDirectories: true)
+
+            // 自己落盘，不用 ZIPFoundation 的 `extract(_:to:)`：
+            // 那个重载会调 transferAttributes，把归档里记的 posixPermissions
+            // 原样盖到文件上；一旦那一位是 0，落盘的文件或目录就变成不可读，
+            // 后续 inspect 会以「没有 Payload」这种误导性的方式失败。
+            // 用 consumer 重载可以绕开它，同时也绕开「目标已存在就报错」的
+            // 前置检查（归档里出现重复条目时那个检查会直接让解包失败）。
+            if !fm.fileExists(atPath: destination.path) {
+                guard fm.createFile(atPath: destination.path, contents: nil) else {
+                    throw SigningError.packagingFailed("无法创建文件：\(relative)")
+                }
+            }
+            let handle = try FileHandle(forWritingTo: destination)
+            do {
+                try handle.truncate(atOffset: 0)
+                _ = try archive.extract(entry, consumer: { chunk in
+                    try handle.write(contentsOf: chunk)
+                })
+                try handle.close()
+            } catch {
+                try? handle.close()
+                throw error
+            }
+            extractedFiles += 1
         }
 
-        return try inspect(directory: directory)
+        return try inspect(directory: directory, extractedFileCount: extractedFiles)
     }
 
     /// 在已解包的目录里定位 .app 并读取清单
     public static func inspect(directory: URL) throws -> Contents {
+        try inspect(directory: directory, extractedFileCount: nil)
+    }
+
+    private static func inspect(directory: URL, extractedFileCount: Int?) throws -> Contents {
         let fm = FileManager.default
         let payload = directory.appendingPathComponent("Payload", isDirectory: true)
+
+        var isDirectoryFlag: ObjCBool = false
+        guard fm.fileExists(atPath: payload.path, isDirectory: &isDirectoryFlag),
+              isDirectoryFlag.boolValue else {
+            // 把「实际解出了什么」一并带上。这类失败最容易被一句
+            // 「不是有效归档」糊过去，而真正的原因往往就写在目录内容里。
+            var detail = "解包目录里没有 Payload 文件夹。"
+            if let extractedFileCount, extractedFileCount == 0 {
+                detail = "归档里没有任何条目被解出来 —— 要么归档是空的，"
+                       + "要么所有条目都被路径安全校验拦掉了。"
+            }
+            throw SigningError.noAppBundleInArchive(detail + listing(directory))
+        }
 
         let entries = (try? fm.contentsOfDirectory(at: payload,
                                                    includingPropertiesForKeys: nil,
                                                    options: [])) ?? []
         guard let app = entries.first(where: { $0.pathExtension == "app" }) else {
-            throw SigningError.noAppBundleInArchive
+            throw SigningError.noAppBundleInArchive(
+                "Payload 里没有 .app。" + listing(directory: payload)
+            )
         }
 
         let infoURL = app.appendingPathComponent("Info.plist")
-        guard let info = try? PropertyListSerialization
-            .propertyList(from: Data(contentsOf: infoURL), options: [], format: nil)
-                as? [String: Any] else {
-            throw SigningError.noAppBundleInArchive
+        guard let infoData = try? Data(contentsOf: infoURL) else {
+            throw SigningError.noAppBundleInArchive(
+                "\(app.lastPathComponent) 里读不到 Info.plist。" + listing(directory: app)
+            )
+        }
+        guard let info = (try? PropertyListSerialization.propertyList(from: infoData,
+                                                                     options: [],
+                                                                     format: nil))
+                            as? [String: Any] else {
+            throw SigningError.noAppBundleInArchive(
+                "\(app.lastPathComponent)/Info.plist 不是合法的 plist 字典。"
+            )
         }
 
         let executable = info["CFBundleExecutable"] as? String ?? ""
@@ -100,57 +155,65 @@ public enum IPAArchive {
 
     // MARK: - 打包
 
-    /// 把已签名的 .app 重新打成 IPA
+    /// 把已签名的 .app 重新打成 IPA。
     ///
-    /// IPA 的结构是 `Payload/xxx.app/...`，所以压缩的基准目录是 `Payload` 的父目录。
-    public static func package(appBundle: URL, to ipa: URL) throws {
+    /// IPA 的结构是 `Payload/xxx.app/...`，所以归档里的根目录就是 `Payload`。
+    ///
+    /// `onProgress` 回调 0.0–1.0 的进度，用于界面进度条。
+    public static func package(appBundle: URL,
+                               to ipa: URL,
+                               onProgress: ((Double) -> Void)? = nil) throws {
         let fm = FileManager.default
-        try fm.createDirectory(at: ipa.deletingLastPathComponent(),
-                               withIntermediateDirectories: true)
-        try? fm.removeItem(at: ipa)
+        let payload = appBundle.deletingLastPathComponent()
 
-        guard let archive = try? Archive(url: ipa, accessMode: .create, pathEncoding: nil) else {
-            throw SigningError.packagingFailed("无法创建归档文件")
+        guard fm.fileExists(atPath: payload.path) else {
+            throw SigningError.packagingFailed("找不到 Payload 目录：\(payload.lastPathComponent)")
         }
 
-        let payload = appBundle.deletingLastPathComponent()
-        let root = payload.deletingLastPathComponent()
+        let writer = try ZipWriter(url: ipa)
+        var succeeded = false
+        defer {
+            writer.close()
+            // 失败时别把半个归档留在输出目录里 —— 用户看到文件会以为成功了
+            if !succeeded { try? fm.removeItem(at: ipa) }
+        }
 
         do {
-            try addDirectory(payload, relativeTo: root, into: archive)
+            let total = totalBytes(of: payload)
+            var processed: Int64 = 0
+
+            try addDirectory(payload,
+                             relativePath: "Payload",
+                             into: writer,
+                             totalBytes: total,
+                             processedBytes: &processed,
+                             onProgress: onProgress)
+
+            try writer.finish()
+            succeeded = true
+        } catch let error as SigningError {
+            throw error
         } catch {
             throw SigningError.packagingFailed(error.localizedDescription)
         }
     }
 
+    /// 递归把 `directory` 写进归档。
+    ///
+    /// 相对路径是**一路拼出来的**，不做任何绝对路径的前缀运算 ——
+    /// 见 `sanitizedRelativePath` 上方的注释，这类前缀运算在真机上会因
+    /// `/var` → `/private/var` 的符号链接而算出不一致的结果。
     private static func addDirectory(_ directory: URL,
-                                     relativeTo base: URL,
-                                     into archive: Archive) throws {
+                                     relativePath: String,
+                                     into writer: ZipWriter,
+                                     totalBytes: Int64,
+                                     processedBytes: inout Int64,
+                                     onProgress: ((Double) -> Void)?) throws {
         let fm = FileManager.default
-        let basePath = base.standardizedFileURL.path
-        let dirPath = directory.standardizedFileURL.path
 
-        guard dirPath.hasPrefix(basePath) else { return }
-
-        var relative = String(dirPath.dropFirst(basePath.count))
-        if relative.hasPrefix("/") { relative.removeFirst() }
-        guard !relative.isEmpty else { return }
-        relative += "/"
-
-        // 目录条目本身不带数据，但必须显式写进归档 —— 否则空目录会在
-        // 解包时消失（iOS 的 .app 里有不少空目录）。
-        //
-        // 这里两个参数是刻意写死的：
-        //   - uncompressedSize 用 Int64(0) 而不是 0：ZIPFoundation 里同时存在
-        //     `uncompressedSize: Int64`（新）与 `UInt32`（已废弃）两个重载，
-        //     传整数字面量会让编译器无法选择。
-        //   - provider 闭包显式标注参数类型，进一步锁定到新重载
-        //     （废弃版的闭包签名是 (Int, Int)）。
-        try archive.addEntry(with: relative,
-                             type: .directory,
-                             uncompressedSize: Int64(0),
-                             compressionMethod: .none,
-                             provider: { (_: Int64, _: Int) throws -> Data in Data() })
+        // 目录条目必须显式写进归档，否则空目录在解包后会消失
+        //（iOS 的 .app 里空目录并不少见）。
+        try writer.addDirectory(relativePath)
 
         let children = try fm.contentsOfDirectory(
             at: directory,
@@ -162,18 +225,115 @@ public enum IPAArchive {
             let isDirectory = (try? child.resourceValues(forKeys: [.isDirectoryKey])
                 .isDirectory) ?? false
 
+            let childRelativePath = relativePath + "/" + child.lastPathComponent
+
             if isDirectory {
-                try addDirectory(child, relativeTo: base, into: archive)
+                try addDirectory(child,
+                                 relativePath: childRelativePath,
+                                 into: writer,
+                                 totalBytes: totalBytes,
+                                 processedBytes: &processedBytes,
+                                 onProgress: onProgress)
                 continue
             }
 
-            let childPath = child.standardizedFileURL.path
-            guard childPath.hasPrefix(basePath + "/") else { continue }
-
-            var rel = String(childPath.dropFirst(basePath.count))
-            if rel.hasPrefix("/") { rel.removeFirst() }
-
-            try archive.addEntry(with: rel, fileURL: child, compressionMethod: .deflate)
+            try writer.addFile(childRelativePath, at: child) { processed, _ in
+                guard totalBytes > 0 else { return }
+                onProgress?(Double(processedBytes + processed) / Double(totalBytes))
+            }
+            processedBytes += fileSize(child)
         }
+    }
+
+    // MARK: - 路径安全
+
+    /// 把归档里的条目路径归一化成安全的相对路径。
+    ///
+    /// 返回 `nil` 表示这条路径会逃出目标目录，必须丢弃。
+    ///
+    /// ## 为什么不用 `standardizedFileURL`
+    ///
+    /// 原实现是这么做的：拿 `directory.standardizedFileURL.path` 当基准，
+    /// 再拿 `appendingPathComponent(entry.path).standardizedFileURL.path`
+    /// 去比前缀。这个写法**只在真机上会挂**：
+    ///
+    /// iOS 的临时目录在 `/var/...`，而 `/var` 是指向 `/private/var` 的符号
+    /// 链接。已经存在的基准目录会被标准化成 `/private/var/...`，而刚拼出来、
+    /// 还没创建的条目目标不会 —— 前缀比对于是全部失败，所有条目都被当成
+    /// 「路径逃逸」跳过，最后以「没有 Payload 目录」这种误导性的方式报错。
+    /// 模拟器上路径在 `/Users` 下，没有这层链接，所以一直是绿的。
+    ///
+    /// 改成纯词法归一化：只看路径本身，与它存不存在无关。
+    static func sanitizedRelativePath(_ raw: String) -> String? {
+        var components: [String] = []
+        for part in raw.split(separator: "/", omittingEmptySubsequences: true) {
+            if part == "." { continue }
+            if part == ".." { return nil }
+            components.append(String(part))
+        }
+        guard !components.isEmpty else { return nil }
+
+        var result = components.joined(separator: "/")
+        if raw.hasSuffix("/") { result += "/" }
+        return result
+    }
+
+    // MARK: - 诊断信息
+
+    /// 生成一小段「这个目录里实际有什么」的描述，附在报错里。
+    private static func listing(directory: URL, limit: Int = 8) -> String {
+        let fm = FileManager.default
+        guard let items = try? fm.contentsOfDirectory(atPath: directory.path) else {
+            return "（\(directory.lastPathComponent) 不存在或读不到）"
+        }
+        guard !items.isEmpty else {
+            return "（\(directory.lastPathComponent) 是空的）"
+        }
+        let shown = items.sorted().prefix(limit).joined(separator: "、")
+        let more = items.count > limit ? "，另有 \(items.count - limit) 项" : ""
+        return " 实际内容：\(shown)\(more)。"
+    }
+
+    // MARK: - 小工具
+
+    private static func fileSize(_ url: URL) -> Int64 {
+        ((try? FileManager.default.attributesOfItem(atPath: url.path))?[.size] as? NSNumber)?
+            .int64Value ?? 0
+    }
+
+    /// 预先算出总字节数，用于把打包进度换算成百分比。
+    /// 只读元数据，不读文件内容。
+    private static func totalBytes(of directory: URL) -> Int64 {
+        let fm = FileManager.default
+        guard let enumerator = fm.enumerator(
+            at: directory,
+            includingPropertiesForKeys: [.isRegularFileKey, .fileSizeKey],
+            options: []
+        ) else { return 0 }
+
+        var total: Int64 = 0
+        for case let url as URL in enumerator {
+            guard let values = try? url.resourceValues(forKeys: [.isRegularFileKey, .fileSizeKey]),
+                  values.isRegularFile == true else { continue }
+            total += Int64(values.fileSize ?? 0)
+        }
+        return total
+    }
+}
+
+// MARK: - 相对路径拼接
+
+extension URL {
+
+    /// 逐段拼接相对路径。
+    ///
+    /// 不直接用 `appendingPathComponent(整个相对路径)`：部分 Foundation 版本
+    /// 会把里面的 `/` 百分号转义掉，拼出一个名字里带 `%2F` 的文件。
+    func appendingRelativePath(_ relative: String) -> URL {
+        var url = self
+        for part in relative.split(separator: "/") {
+            url.appendPathComponent(String(part))
+        }
+        return url
     }
 }
